@@ -1,0 +1,9 @@
+google-genai
+google-auth
+python-dotenv
+tqdm
+datasets
+huggingface_hub
+hf-transfer
+torchcodec
+torch 

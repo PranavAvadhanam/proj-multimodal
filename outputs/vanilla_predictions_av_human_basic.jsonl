@@ -1,0 +1,1 @@
+{"pass": "AV-Human-basic", "sample_id": "1", "task_type": "Audio Event Location", "task_code": "AEL", "gold": "C", "pred": "A", "raw_pred": "A", "status": "ok", "error": "", "has_video_input": true, "video_media_kind": "usable_video_input"}

@@ -1,0 +1,49 @@
+{
+  "pass": "AV-Human-basic",
+  "table3_note": "single sample + single HF video",
+  "qa_jsonl": "data/avut/avut_human_filtered.jsonl",
+  "metadata_json": [
+    "data/avut/hf_raw/AV_Human_filtered_data.json"
+  ],
+  "accuracy": 0.0,
+  "task_accuracy": {
+    "AIE": 0.0,
+    "ACC": 0.0,
+    "AEL": 0.0,
+    "AVCM": 0.0,
+    "AVOM": 0.0,
+    "AVTM": 0.0
+  },
+  "task_counts_scored": {
+    "AIE": 0,
+    "ACC": 0,
+    "AEL": 1,
+    "AVCM": 0,
+    "AVOM": 0,
+    "AVTM": 0
+  },
+  "n_samples_total": 1,
+  "n_samples_scored": 1,
+  "n_samples_failed": 0,
+  "video_ready_count": 1,
+  "video_missing_count": 0,
+  "video_media_kinds": {
+    "usable_video_input": 1
+  },
+  "gemini_model_configured": "gemini-2.5-flash",
+  "gemini_model_effective": "gemini-2.5-flash",
+  "pipeline_latency_ms": 13723,
+  "pipeline_latency_s": 13.723,
+  "run_logs": [
+    "[AV-Human-basic] Start | note=single sample + single HF video | samples=1",
+    "[AV-Human-basic] QA=data/avut/avut_human_filtered.jsonl",
+    "[AV-Human-basic] Metadata=data/avut/hf_raw/AV_Human_filtered_data.json",
+    "[AV-Human-basic] HF_URI=hf://tsinghua-ee/AVUTBenchmark@train",
+    "[AV-Human-basic] Model=gemini-2.5-flash",
+    "[AV-Human-basic] Video availability: ready=1/1, missing=0/1",
+    "[AV-Human-basic] Done | scored=1/1 | acc=0.0000 | latency_ms=13723 | outputs=vanilla_predictions_av_human_basic.jsonl,vanilla_metrics_av_human_basic.json"
+  ],
+  "sample_id": "1",
+  "sample_video_uri": "/mnt/bn/tiktok-mm-4/aiic/users/yangyudong/AVbenchmark/data/Itc6OFCjJVQ.mp4",
+  "sample_video_url_used": "https://huggingface.co/datasets/tsinghua-ee/AVUTBenchmark/resolve/558ca95ac16c972a4de2028fbecef2a8b82fdb00/Itc6OFCjJVQ.mp4"
+}

@@ -1,0 +1,64 @@
+# ---- Secrets / local env ----
+.env
+.env.*
+!.env.example
+
+# ---- Python virtual environments ----
+.venv/
+.venv-clean/
+.venv_lib/
+venv/
+ENV/
+env/
+
+# ---- Native binaries / compiled libs ----
+*.dylib
+*.so
+*.so.*
+*.dll
+*.exe
+*.a
+*.o
+*.obj
+
+# Root-level vendor/binary drops (adjust if you need a tracked root lib/)
+/lib/
+
+# ---- Python bytecode / tooling caches ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- Notebook / interactive ----
+.ipynb_checkpoints/
+
+# ---- Package/build artifacts ----
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- Project-local model/data caches ----
+.hf_cache/
+.cache/
+
+# ---- OS / editor ----
+.DS_Store
+.vscode/
+.idea/
+
+# ---- Logs / runtime dumps ----
+*.log
+*.out
+*.err

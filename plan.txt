@@ -1,0 +1,124 @@
+Project plan (refactored with AVUT + MUStReason context)
+
+Core objective
+- Build a minimal Gemini-based pipeline that tests whether modality-separated pragmatic prompting improves performance and robustness on AVUT-style audio-centric QA.
+- Keep all evaluation centered on evidence from AVUT:
+  - Text shortcut control via answer permutations.
+  - Modality necessity via ablations.
+  - Task-level analysis (AIE, ACC, AEL, AVCM, AVOM, AVTM).
+
+Design principles from the papers
+- From AVUT:
+  - Preserve fixed MCQ prompt format for fair comparisons.
+  - Use cyclic option permutations (ABCD, BCDA, CDAB, DABC) to reduce positional bias and detect text shortcuts.
+  - Compare full AV input against partial modalities (video-only, audio-only, transcript-only).
+- From MUStReason / PragCoT:
+  - Separate pipeline into Perception -> Decoding -> Reasoning.
+  - Generate modality-specific descriptions first, then decode pragmatic signal, then answer.
+  - Treat decoding as a key intervention (ablate it explicitly).
+
+Main deliverables
+- D1: Baselines on AVUT subset with Gemini.
+  - Vanilla direct QA (single prompt, no decomposition).
+  - Simple CoT QA (no explicit modality separation).
+- D2: Modality-separated PragCoT-style pipeline.
+  - Perception: independent text/audio/video descriptions.
+  - Decoding: derive cross-modal incongruity/intent cues from perception outputs.
+  - Reasoning: final CoT over decoded cues + fixed AVUT MCQ wrapper.
+- D3: Bias/shortcut diagnosis.
+  - Permutation consistency checks.
+  - Modality ablation matrix.
+  - Optional modality-importance weighting extension.
+
+Idea 1 (updated): permutation filtering + modality ablations
+Hypothesis
+- If a sample is consistently answered correctly without critical modalities across all permutations, the model is likely exploiting shortcut cues.
+
+Protocol
+- For each MCQ sample, evaluate 4 option permutations:
+  - ABCD, BCDA, CDAB, DABC
+- Run each permutation under these input settings:
+  - V+A+T (full)
+  - A+T (no video)
+  - V+T (no audio)
+  - T only
+  - V only (if promptable)
+  - A only (if promptable)
+  - V+A (no transcript/text question context kept minimal except required prompt scaffold)
+- Mark samples as likely shortcut-prone when:
+  - Correct across all permutations under reduced-modality settings.
+
+Outputs
+- Subset labels: modality-dependent vs shortcut-prone.
+- Performance before/after filtering shortcut-prone samples.
+
+Idea 2 (updated): modality-separated PragCoT for AVUT
+Hypothesis
+- Explicit Perception -> Decoding -> Reasoning improves AVUT performance over vanilla and plain CoT, especially on audio-essential tasks (ACC/AEL).
+
+Minimal pipeline
+- Step 1: Perception prompts
+  - Text perception: literal utterance meaning and salient lexical cues.
+  - Audio perception: prosody/event/timing cues.
+  - Video perception: entities/actions/scene cues relevant to question.
+- Step 2: Decoding prompt
+  - Combine modality outputs.
+  - Extract conflicts/alignment and pragmatic implications.
+  - Produce a compact decoded representation.
+- Step 3: Reasoning + answer
+  - Use fixed AVUT MCQ wrapper.
+  - Reason over decoded representation.
+  - Return only final option letter for scoring.
+
+Critical ablations
+- Remove decoding step.
+- Remove one perception stream at a time.
+- Compare to vanilla and CoT baselines.
+
+Idea 3 (updated): modality importance score weighting
+Hypothesis
+- Weighting modality evidence by estimated importance improves robustness on mixed difficulty samples.
+
+Minimal version
+- Use small calibration set (for example 10-50 samples).
+- Estimate per-sample modality importance from performance drop when removing each modality.
+- Inject weights into decoding prompt to prioritize stronger evidence.
+- Compare weighted vs unweighted decoding.
+
+Evaluation plan (minimal)
+- Primary metrics:
+  - MCQ accuracy overall.
+  - Macro average across AVUT task types.
+- Diagnostic metrics:
+  - Permutation consistency rate.
+  - Shortcut susceptibility rate (text-only / reduced modality).
+  - Delta from full input to each ablation setting.
+- Report split:
+  - AV-Human vs AV-Gemini when available.
+
+Gemini API execution notes
+- Keep one fixed model/version per experiment block.
+- Fix temperature and sampling settings for comparability.
+- Cache modality descriptions to reduce cost and variance.
+- Enforce deterministic post-processing for final option extraction.
+
+Immediate MVP sequence
+1) Run vanilla + CoT baselines on a small balanced subset.
+2) Implement modality-separated PragCoT pipeline and run same subset.
+3) Add decoding ablation and single-modality-drop ablations.
+4) Add permutation checks for shortcut diagnosis.
+5) Expand sample size only after pipeline is stable.
+
+Minimal filesystem to implement now
+- src/config.py
+- src/main.py
+- src/avut/dataset.py
+- src/avut/prompts.py
+- src/gemini/client.py
+- src/gemini/modality_describer.py
+- src/gemini/decoder.py
+- src/gemini/reasoner.py
+- src/eval/metrics.py
+- scripts/run_idea2.py
+- data/avut/sample.jsonl
+- outputs/ (predictions + metrics)
