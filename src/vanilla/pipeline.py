@@ -19,7 +19,12 @@ from src.avut.dataset import (
 )
 from src.avut.dataset_basic import load_basic_human_sample
 from src.config import Settings, get_settings
-from src.eval.metrics import accuracy, normalize_option
+from src.avut.prompts import (
+    FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
+    final_mcq_answer_format_prompt,
+    vanilla_mcq_answer_preamble_prompt,
+)
+from src.eval.metrics import accuracy
 from src.mspragcot.client import GeminiClient
 
 
@@ -118,14 +123,8 @@ def _prepare_pass_samples(
 
 def _build_vanilla_prompt(sample: MCQSample) -> str:
     return (
-        "Answer the multiple-choice question using only the attached video.\n"
-        "Do not provide explanation.\n\n"
-        f"Question: {sample.question}\n"
-        f"A. {sample.option_a}\n"
-        f"B. {sample.option_b}\n"
-        f"C. {sample.option_c}\n"
-        f"D. {sample.option_d}\n\n"
-        "Return only one letter: A, B, C, or D."
+        f"{vanilla_mcq_answer_preamble_prompt(sample)}\n\n"
+        f"{final_mcq_answer_format_prompt()}"
     )
 
 
@@ -136,8 +135,13 @@ def run_vanilla_pipeline(
     run_sample: str | None = None,
     prefetch_videos: int | None = None,
     no_prefetch_videos: bool = False,
+    split_max_samples: bool = False,
 ) -> dict:
-    """Run vanilla baseline: one direct video+question prompt per sample."""
+    """Run vanilla baseline: one direct video+question prompt per sample.
+
+    Default mode runs AV-Human only. Optional split mode runs AV-Human and AV-Gemini
+    with --max-samples interpreted as a total budget split between passes.
+    """
     settings = get_settings()
     base_out = Path(output_dir or settings.output_dir)
     base_out.mkdir(parents=True, exist_ok=True)
@@ -175,6 +179,9 @@ def run_vanilla_pipeline(
             },
         )
         return {"AV_Human_basic": metrics}
+
+    if split_max_samples and max_samples is None:
+        raise ValueError("--split-max-samples requires --max-samples.")
 
     if input_jsonl is not None:
         print(
@@ -232,13 +239,86 @@ def run_vanilla_pipeline(
         )
         return {"single": metrics}
 
+    if split_max_samples:
+        assert max_samples is not None
+        max_h = (max_samples + 1) // 2
+        max_g = max_samples // 2
+        print(
+            "AVUT split mode: metrics are reported for both AV-Human and AV-Gemini.\n"
+            f"--max-samples={max_samples!r}: total budget split as AV-Human={max_h}, AV-Gemini={max_g}.\n"
+            f"--prefetch-videos={prefetch_videos!r}: caps distinct ids prefetched per side "
+            "(default: all needed on each side). Use --no-prefetch-videos to skip Hub entirely.\n"
+        )
+
+        samples_human = _prepare_pass_samples(
+            pass_label="AV-Human",
+            qa_jsonl_path=settings.qa_human_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_human_json,),
+            max_samples=max_h,
+        )
+        samples_gemini = _prepare_pass_samples(
+            pass_label="AV-Gemini",
+            qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_gemini_json,),
+            max_samples=max_g,
+        )
+        qh = [str(s.sample_id) for s in samples_human]
+        qg = [str(s.sample_id) for s in samples_gemini]
+        if no_prefetch_videos:
+            print("[Prefetch] Skipped (--no-prefetch-videos).\n")
+            vmap_h, vmap_g = {}, {}
+        else:
+            nh, ng = len(set(qh)), len(set(qg))
+            cap_note = (
+                f" (each side capped to {prefetch_videos} id(s))"
+                if prefetch_videos is not None
+                else ""
+            )
+            print(
+                f"[Prefetch] AV-Human {nh} distinct id(s), AV-Gemini {ng} distinct id(s); "
+                f"one HF stream / one bar{cap_note}.\n"
+            )
+            vmap_h, vmap_g = prefetch_hf_avut_train_videos(
+                qh,
+                qg,
+                settings.hf_video_dataset_uri,
+                max_videos=prefetch_videos,
+                desc="Prefetch videos (HF)",
+                human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
+                gemini_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_gemini},
+            )
+        attach_prefetched_videos(samples_human, vmap_h)
+        attach_prefetched_videos(samples_gemini, vmap_g)
+
+        m_human = _run_pass_inference(
+            settings=settings,
+            pass_label="AV-Human",
+            table3_note="Table 3 left of '/'",
+            samples=samples_human,
+            qa_jsonl_path=settings.qa_human_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_human_json,),
+            out_dir=base_out,
+            file_slug="av_human",
+        )
+        m_gemini = _run_pass_inference(
+            settings=settings,
+            pass_label="AV-Gemini",
+            table3_note="Table 3 right of '/'",
+            samples=samples_gemini,
+            qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_gemini_json,),
+            out_dir=base_out,
+            file_slug="av_gemini",
+        )
+        return {"AV_Human": m_human, "AV_Gemini": m_gemini}
+
+    # Default mode: AV-Human only.
     n = max_samples if max_samples is not None else "all"
     print(
-        "AVUT Table 3 alignment: metrics are reported separately for each side of '/' "
-        "(AV-Human vs AV-Gemini). No mixing of QA or metadata between passes.\n"
-        f"--max-samples={max_samples!r}: up to {n} QA rows **per pass** (task-balanced).\n"
-        f"--prefetch-videos={prefetch_videos!r}: caps distinct ids prefetched **per pass** (Human vs Gemini; "
-        "default: all needed on each side). Use --no-prefetch-videos to skip Hub entirely.\n"
+        "AVUT default mode: running AV-Human only.\n"
+        f"--max-samples={max_samples!r}: up to {n} AV-Human QA rows (task-balanced).\n"
+        f"--prefetch-videos={prefetch_videos!r}: caps AV-Human distinct ids prefetched "
+        "(default: all needed). Use --no-prefetch-videos to skip Hub entirely.\n"
     )
 
     samples_human = _prepare_pass_samples(
@@ -247,61 +327,36 @@ def run_vanilla_pipeline(
         metadata_paths=(settings.video_metadata_human_json,),
         max_samples=max_samples,
     )
-    samples_gemini = _prepare_pass_samples(
-        pass_label="AV-Gemini",
-        qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
-        metadata_paths=(settings.video_metadata_gemini_json,),
-        max_samples=max_samples,
-    )
     qh = [str(s.sample_id) for s in samples_human]
-    qg = [str(s.sample_id) for s in samples_gemini]
     if no_prefetch_videos:
         print("[Prefetch] Skipped (--no-prefetch-videos).\n")
-        vmap_h, vmap_g = {}, {}
+        vmap_h = {}
     else:
-        nh, ng = len(set(qh)), len(set(qg))
-        cap_note = (
-            f" (each side capped to {prefetch_videos} id(s))"
-            if prefetch_videos is not None
-            else ""
-        )
-        print(
-            f"[Prefetch] AV-Human {nh} distinct id(s), AV-Gemini {ng} distinct id(s); "
-            f"one HF stream / one bar{cap_note}.\n"
-        )
-        vmap_h, vmap_g = prefetch_hf_avut_train_videos(
+        nh = len(set(qh))
+        cap_note = f" (capped to {prefetch_videos} id(s))" if prefetch_videos is not None else ""
+        print(f"[Prefetch] AV-Human {nh} distinct id(s); one HF stream / one bar{cap_note}.\n")
+        vmap_h, _ = prefetch_hf_avut_train_videos(
             qh,
-            qg,
+            None,
             settings.hf_video_dataset_uri,
             max_videos=prefetch_videos,
             desc="Prefetch videos (HF)",
             human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
-            gemini_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_gemini},
+            gemini_expected_video_by_id=None,
         )
     attach_prefetched_videos(samples_human, vmap_h)
-    attach_prefetched_videos(samples_gemini, vmap_g)
 
     m_human = _run_pass_inference(
         settings=settings,
         pass_label="AV-Human",
-        table3_note="Table 3 left of '/'",
+        table3_note="AV-Human only (default)",
         samples=samples_human,
         qa_jsonl_path=settings.qa_human_filtered_jsonl,
         metadata_paths=(settings.video_metadata_human_json,),
         out_dir=base_out,
         file_slug="av_human",
     )
-    m_gemini = _run_pass_inference(
-        settings=settings,
-        pass_label="AV-Gemini",
-        table3_note="Table 3 right of '/'",
-        samples=samples_gemini,
-        qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
-        metadata_paths=(settings.video_metadata_gemini_json,),
-        out_dir=base_out,
-        file_slug="av_gemini",
-    )
-    return {"AV_Human": m_human, "AV_Gemini": m_gemini}
+    return {"AV_Human": m_human}
 
 
 def _run_pass_inference(
@@ -369,8 +424,15 @@ def _run_pass_inference(
         try:
             if has_video:
                 prompt = _build_vanilla_prompt(sample)
-                raw_pred = client.generate(prompt, media_input=sample.video_input, stage="vanilla_answer")
-                pred = normalize_option(raw_pred)
+                pred, raw_text = client.generate_answer_letter(
+                    prompt,
+                    media_input=sample.video_input,
+                    stage="vanilla_answer",
+                    extraction_mode="answer_is",
+                    max_output_tokens=FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
+                    format_retry_attempts=3,
+                )
+                raw_pred = raw_text
                 preds.append(pred)
                 correct.append(sample.answer)
                 task_code = sample.task_code or "UNKNOWN"

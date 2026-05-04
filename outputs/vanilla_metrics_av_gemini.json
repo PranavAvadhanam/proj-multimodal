@@ -5,10 +5,10 @@
   "metadata_json": [
     "data/avut/hf_raw/AV_Gemini_filtered_data.json"
   ],
-  "accuracy": 0.6,
+  "accuracy": 0.8,
   "task_accuracy": {
     "AIE": 1.0,
-    "ACC": 0.0,
+    "ACC": 1.0,
     "AEL": 0.0,
     "AVCM": 1.0,
     "AVOM": 1.0,
@@ -30,17 +30,17 @@
   "video_media_kinds": {
     "usable_video_input": 5
   },
-  "gemini_model_configured": "gemini-2.5-flash-lite",
-  "gemini_model_effective": "gemini-2.5-flash-lite",
-  "pipeline_latency_ms": 60882,
-  "pipeline_latency_s": 60.882,
+  "gemini_model_configured": "gemini-2.5-flash",
+  "gemini_model_effective": "gemini-2.5-flash",
+  "pipeline_latency_ms": 27620,
+  "pipeline_latency_s": 27.62,
   "run_logs": [
     "[AV-Gemini] Start | note=Table 3 right of '/' | samples=5",
     "[AV-Gemini] QA=data/avut/avut_gemini_filtered.jsonl",
     "[AV-Gemini] Metadata=data/avut/hf_raw/AV_Gemini_filtered_data.json",
     "[AV-Gemini] HF_URI=hf://tsinghua-ee/AVUTBenchmark@train",
-    "[AV-Gemini] Model=gemini-2.5-flash-lite",
+    "[AV-Gemini] Model=gemini-2.5-flash",
     "[AV-Gemini] Video availability: ready=5/5, missing=0/5",
-    "[AV-Gemini] Done | scored=5/5 | acc=0.6000 | latency_ms=60882 | outputs=vanilla_predictions_av_gemini.jsonl,vanilla_metrics_av_gemini.json"
+    "[AV-Gemini] Done | scored=5/5 | acc=0.8000 | latency_ms=27620 | outputs=vanilla_predictions_av_gemini.jsonl,vanilla_metrics_av_gemini.json"
   ]
 }

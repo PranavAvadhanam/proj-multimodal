@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
 def _normalize_google_credentials_env() -> None:
@@ -24,6 +24,9 @@ def _normalize_google_credentials_env() -> None:
 class Settings:
     gemini_api_key: str
     gemini_model: str
+    video_sample_fps: float
+    video_max_width: int
+    video_crf: int
     temperature: float
     max_output_tokens: int
     timeout_ms: int
@@ -50,6 +53,9 @@ def get_settings() -> Settings:
     return Settings(
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=DEFAULT_GEMINI_MODEL,
+        video_sample_fps=float(os.getenv("VIDEO_SAMPLE_FPS", "0.5")),
+        video_max_width=int(os.getenv("VIDEO_MAX_WIDTH", "640")),
+        video_crf=int(os.getenv("VIDEO_CRF", "34")),
         temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.1")),
         max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "256")),
         timeout_ms=int(os.getenv("GEMINI_TIMEOUT_MS", "90000")),

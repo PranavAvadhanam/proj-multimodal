@@ -62,3 +62,6 @@ pip-wheel-metadata/
 *.log
 *.out
 *.err
+
+# ---- Vendored / external research subtree (not part of this repo) ----
+omnimodel-research/

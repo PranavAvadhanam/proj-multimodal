@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
+import re
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -10,6 +13,7 @@ from google import genai
 from google.genai import types
 
 from src.config import Settings
+from src.eval.metrics import extract_final_answer_letter
 
 
 class GeminiClient:
@@ -21,14 +25,24 @@ class GeminiClient:
             http_options=types.HttpOptions(timeout=settings.timeout_ms),
         )
         self._active_model = settings.gemini_model
-        self._generation_config = types.GenerateContentConfig(
-            temperature=settings.temperature,
-            max_output_tokens=settings.max_output_tokens,
-            system_instruction=settings.system_instruction,
-        )
         self._metrics_path = Path(settings.output_dir) / "gemini_call_metrics_detailed.jsonl"
         self._metrics_path.parent.mkdir(parents=True, exist_ok=True)
         self._run_context: dict[str, object] = {}
+        self._media_cache_dir = Path(settings.output_dir) / "gemini_media_cache"
+        self._media_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _generation_config(
+        self, *, max_output_tokens: int | None = None
+    ) -> types.GenerateContentConfig:
+        return types.GenerateContentConfig(
+            temperature=self._settings.temperature,
+            max_output_tokens=(
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._settings.max_output_tokens
+            ),
+            system_instruction=self._settings.system_instruction,
+        )
 
     @property
     def active_model(self) -> str:
@@ -103,6 +117,65 @@ class GeminiClient:
         rev, rel = tail.split("/", 1)
         return f"https://huggingface.co/datasets/{repo}/{mode}/{rev}/{rel}"
 
+    def _sampled_video_path(self, src: str) -> str | None:
+        """Create a low-fps, lower-resolution cached MP4 for faster Gemini uploads."""
+        if self._settings.video_sample_fps <= 0:
+            return src
+        key = hashlib.sha1(
+            (
+                f"{src}|fps={self._settings.video_sample_fps}|w={self._settings.video_max_width}|"
+                f"crf={self._settings.video_crf}"
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        out_path = self._media_cache_dir / f"sampled_{key}.mp4"
+        if out_path.exists():
+            return str(out_path)
+        # Keep aspect ratio, force even dimensions for encoder compatibility.
+        vf = (
+            f"fps={self._settings.video_sample_fps},"
+            f"scale='min(iw,{self._settings.video_max_width})':-2:flags=bicubic"
+        )
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-i",
+            src,
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(self._settings.video_crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "48k",
+            str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            return None
+        return str(out_path) if out_path.exists() else None
+
+    def _part_from_uri_with_sampling(self, uri: str, mime_hint: str) -> types.Part:
+        sampled = self._sampled_video_path(uri)
+        if sampled:
+            p = Path(sampled)
+            return types.Part.from_bytes(
+                data=p.read_bytes(),
+                mime_type=self._guess_mime(str(p), "video/mp4"),
+            )
+        return types.Part.from_uri(
+            file_uri=uri,
+            mime_type=self._guess_mime(mime_hint, "video/mp4"),
+        )
+
     def _as_media_part(self, media_input: object) -> object | None:
         """Normalize local-path / dict media to a Gemini Part.
 
@@ -124,15 +197,9 @@ class GeminiClient:
                 if hfp.startswith("hf://datasets/"):
                     resolved = self._hf_to_https(hfp, mode="resolve")
                     if resolved:
-                        return types.Part.from_uri(
-                            file_uri=resolved,
-                            mime_type=self._guess_mime(hfp, "video/mp4"),
-                        )
+                        return self._part_from_uri_with_sampling(resolved, hfp)
                 if "://" in hfp:
-                    return types.Part.from_uri(
-                        file_uri=hfp,
-                        mime_type=self._guess_mime(hfp, "video/mp4"),
-                    )
+                    return self._part_from_uri_with_sampling(hfp, hfp)
 
         if isinstance(media_input, dict):
             b = media_input.get("bytes")
@@ -144,17 +211,16 @@ class GeminiClient:
                 if p.startswith("hf://datasets/"):
                     resolved = self._hf_to_https(p, mode="resolve")
                     if resolved:
-                        return types.Part.from_uri(
-                            file_uri=resolved,
-                            mime_type=self._guess_mime(p, "video/mp4"),
-                        )
+                        return self._part_from_uri_with_sampling(resolved, p)
                 if "://" in p:
-                    return types.Part.from_uri(file_uri=p, mime_type=self._guess_mime(p, "video/mp4"))
+                    return self._part_from_uri_with_sampling(p, p)
                 path = Path(p)
                 if path.exists():
+                    sampled = self._sampled_video_path(str(path)) or str(path)
+                    sp = Path(sampled)
                     return types.Part.from_bytes(
-                        data=path.read_bytes(),
-                        mime_type=self._guess_mime(str(path), fallback="video/mp4"),
+                        data=sp.read_bytes(),
+                        mime_type=self._guess_mime(str(sp), fallback="video/mp4"),
                     )
                 if path.is_absolute():
                     # Best-effort file URI for non-workspace absolute paths.
@@ -165,15 +231,14 @@ class GeminiClient:
 
         if isinstance(media_input, str):
             if "://" in media_input:
-                return types.Part.from_uri(
-                    file_uri=media_input,
-                    mime_type=self._guess_mime(media_input, "video/mp4"),
-                )
+                return self._part_from_uri_with_sampling(media_input, media_input)
             path = Path(media_input)
             if path.exists():
+                sampled = self._sampled_video_path(str(path)) or str(path)
+                sp = Path(sampled)
                 return types.Part.from_bytes(
-                    data=path.read_bytes(),
-                    mime_type=self._guess_mime(str(path), fallback="video/mp4"),
+                    data=sp.read_bytes(),
+                    mime_type=self._guess_mime(str(sp), fallback="video/mp4"),
                 )
             if path.is_absolute():
                 return types.Part.from_uri(
@@ -184,20 +249,20 @@ class GeminiClient:
         p_attr = getattr(media_input, "path", None)
         if isinstance(p_attr, str):
             if "://" in p_attr:
-                return types.Part.from_uri(
-                    file_uri=p_attr,
-                    mime_type=self._guess_mime(p_attr, "video/mp4"),
-                )
+                return self._part_from_uri_with_sampling(p_attr, p_attr)
             path = Path(p_attr)
             if path.exists():
+                sampled = self._sampled_video_path(str(path)) or str(path)
+                sp = Path(sampled)
                 return types.Part.from_bytes(
-                    data=path.read_bytes(),
-                    mime_type=self._guess_mime(str(path), fallback="video/mp4"),
+                    data=sp.read_bytes(),
+                    mime_type=self._guess_mime(str(sp), fallback="video/mp4"),
                 )
             if path.is_absolute():
                 return types.Part.from_uri(
                     file_uri=f"file://{path}",
                     mime_type=self._guess_mime(str(path), "video/mp4"),
+
                 )
 
         return None
@@ -208,16 +273,35 @@ class GeminiClient:
             return False
         return self._as_media_part(media_input) is not None
 
+    @staticmethod
+    def _extract_single_letter(text: str) -> str:
+        m = re.match(r"^\s*([ABCD])\s*$", text or "", flags=re.IGNORECASE)
+        return m.group(1).upper() if m else ""
+
+    @staticmethod
+    def _fallback_first_option(text: str) -> str:
+        t = (text or "").upper()
+        for ch in t:
+            if ch in {"A", "B", "C", "D"}:
+                return ch
+        return ""
+
     def generate(
         self,
         prompt: str,
         media_input: object | None = None,
         *,
         stage: str = "unspecified",
+        max_output_tokens: int | None = None,
     ) -> str:
         """Args: prompt text and optional single-modality media input. Returns: model text output."""
         t0 = time.perf_counter()
         call_id = f"call_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+        eff_max_out = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else self._settings.max_output_tokens
+        )
         self._append_metric(
             "call_start",
             {
@@ -226,6 +310,7 @@ class GeminiClient:
                 "prompt_chars": len(prompt),
                 "has_media_input": media_input is not None,
                 "media_kind": self._media_kind(media_input),
+                "max_output_tokens_effective": eff_max_out,
             },
         )
         contents: list[object] = [prompt]
@@ -254,25 +339,64 @@ class GeminiClient:
                 "has_media_part": len(contents) > 1,
             },
         )
-        try:
-            response = self._client.models.generate_content(
-                model=self._settings.gemini_model,
-                contents=contents,
-                config=self._generation_config,
-            )
-        except Exception as exc:
-            self._append_metric(
-                "call_error",
-                {
-                    "call_id": call_id,
-                    "stage": stage,
-                    "elapsed_ms": int((time.perf_counter() - t0) * 1000),
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "failure_phase": "generate_content",
-                },
-            )
-            raise
+        # Exponential backoff for transient API failures, capped at 64s wait interval.
+        backoff_schedule_s = [1, 2, 4, 8, 16, 32, 64]
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = self._client.models.generate_content(
+                    model=self._settings.gemini_model,
+                    contents=contents,
+                    config=self._generation_config(max_output_tokens=max_output_tokens),
+                )
+                break
+            except Exception as exc:
+                err = str(exc).upper()
+                retryable = any(
+                    token in err
+                    for token in (
+                        "429",
+                        "500",
+                        "502",
+                        "503",
+                        "504",
+                        "RESOURCE_EXHAUSTED",
+                        "UNAVAILABLE",
+                        "DEADLINE_EXCEEDED",
+                        "TIMEOUT",
+                        "TIMED OUT",
+                        "READ OPERATION TIMED OUT",
+                    )
+                )
+                if retryable and attempt <= len(backoff_schedule_s):
+                    wait_s = backoff_schedule_s[attempt - 1]
+                    self._append_metric(
+                        "call_retry",
+                        {
+                            "call_id": call_id,
+                            "stage": stage,
+                            "attempt": attempt,
+                            "retry_wait_s": wait_s,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
+                    time.sleep(wait_s)
+                    continue
+                self._append_metric(
+                    "call_error",
+                    {
+                        "call_id": call_id,
+                        "stage": stage,
+                        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+                        "attempts": attempt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "failure_phase": "generate_content",
+                    },
+                )
+                raise
         self._active_model = self._settings.gemini_model
         text = getattr(response, "text", None)
         self._append_metric(
@@ -281,8 +405,104 @@ class GeminiClient:
                 "call_id": call_id,
                 "stage": stage,
                 "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+                "attempts": attempt,
                 "response_text_chars": len(text) if isinstance(text, str) else 0,
                 "response_has_text": bool(text),
             },
         )
         return text.strip() if text else ""
+
+    def generate_answer_letter(
+        self,
+        prompt: str,
+        media_input: object | None = None,
+        *,
+        stage: str = "answer_letter",
+        max_repair_attempts: int = 3,
+        extraction_mode: str = "single_letter",
+        max_output_tokens: int | None = None,
+        format_retry_attempts: int = 3,
+        idea2_answer_is_max_tokens: int = 250,
+    ) -> tuple[str, str]:
+        """Generate final MCQ letter with retries.
+
+        extraction_mode ``single_letter``: reply must be one letter; repair fixes format.
+        extraction_mode ``answer_is``: reply must contain substring ``Answer is X``;
+        uses ``idea2_answer_is_max_tokens`` (default 250) when ``max_output_tokens`` is omitted,
+        with parse-miss retries and text repair.
+
+        Returns:
+            (letter, raw_text_for_logging)
+        """
+        if extraction_mode == "answer_is":
+            cap = (
+                max_output_tokens
+                if max_output_tokens is not None
+                else idea2_answer_is_max_tokens
+            )
+            raw = ""
+            for i in range(format_retry_attempts):
+                st = stage if i == 0 else f"{stage}_format_retry_{i+1}"
+                raw = self.generate(
+                    prompt,
+                    media_input=media_input,
+                    stage=st,
+                    max_output_tokens=cap,
+                )
+                letter = extract_final_answer_letter(raw)
+                if letter:
+                    return letter, raw
+
+            last_text = raw
+            for i in range(max_repair_attempts):
+                repair_prompt = (
+                    "Your previous reply did not contain a valid substring of the form "
+                    "'Answer is X' where X is exactly one uppercase letter among A, B, C, D.\n"
+                    "Write a short reply that MUST include that exact substring (e.g. \"Answer is B\").\n\n"
+                    f"Previous reply:\n{last_text}"
+                )
+                repaired = self.generate(
+                    repair_prompt,
+                    media_input=None,
+                    stage=f"{stage}_repair_{i+1}",
+                    max_output_tokens=cap,
+                )
+                last_text = repaired
+                letter = extract_final_answer_letter(repaired)
+                if letter:
+                    return letter, repaired
+
+            # IMPORTANT: avoid biased fallbacks (responses often contain many 'A/B/C/D' tokens).
+            return "", last_text
+
+        raw = self.generate(
+            prompt,
+            media_input=media_input,
+            stage=stage,
+            max_output_tokens=max_output_tokens,
+        )
+        letter = self._extract_single_letter(raw)
+        if letter:
+            return letter, raw
+
+        last_text = raw
+        for i in range(max_repair_attempts):
+            repair_prompt = (
+                "Convert the following model response into exactly one uppercase option letter.\n"
+                "Valid outputs: A, B, C, D.\n"
+                "Output exactly one letter and nothing else.\n\n"
+                f"Response:\n{last_text}"
+            )
+            repaired = self.generate(
+                repair_prompt,
+                media_input=None,
+                stage=f"{stage}_repair_{i+1}",
+                max_output_tokens=max_output_tokens,
+            )
+            last_text = repaired
+            letter = self._extract_single_letter(repaired)
+            if letter:
+                return letter, repaired
+
+        fallback = self._fallback_first_option(last_text) or self._fallback_first_option(raw)
+        return fallback, last_text

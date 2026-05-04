@@ -191,12 +191,6 @@ def _video_filename_from_obj(video_obj: object) -> str | None:
     return None
 
 
-def _expected_video_basename(sample: MCQSample) -> str:
-    if isinstance(sample.video_path, str) and sample.video_path:
-        return Path(sample.video_path).name
-    return ""
-
-
 def prefetch_hf_avut_train_videos(
     human_qa_ids: list[str] | None,
     gemini_qa_ids: list[str] | None,
@@ -319,11 +313,11 @@ def attach_prefetched_videos(samples: list[MCQSample], video_by_qa: dict[str, ob
     for s in samples:
         v = video_by_qa.get(str(s.sample_id))
         if v is not None:
-            expected_name = _expected_video_basename(s)
-            actual_name = _video_filename_from_obj(v) or ""
-            # Enforce metadata-basename consistency when metadata exists.
-            if expected_name and actual_name and expected_name != actual_name:
-                continue
+            # Prefer the prefetched HF object for this QA id even when the metadata basename
+            # does not match the Hub filename (e.g. stale server-side paths vs re-keyed uploads).
+            # Skipping attachment left ``video_input`` unset and routed inference to bogus
+            # metadata paths such as ``/mnt/...`` that exist only on upstream hosts, which
+            # breaks ffmpeg-based transcription while Gemini may still appear "usable".
             s.video_input = v
 
 

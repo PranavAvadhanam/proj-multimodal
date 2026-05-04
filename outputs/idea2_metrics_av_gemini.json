@@ -5,26 +5,26 @@
   "metadata_json": [
     "data/avut/hf_raw/AV_Gemini_filtered_data.json"
   ],
-  "accuracy": 0.4,
+  "accuracy": 0.0,
   "task_accuracy": {
     "AIE": 0.0,
     "ACC": 0.0,
-    "AEL": 1.0,
+    "AEL": 0.0,
     "AVCM": 0.0,
-    "AVOM": 1.0,
+    "AVOM": 0.0,
     "AVTM": 0.0
   },
   "task_counts_scored": {
-    "AIE": 1,
-    "ACC": 1,
+    "AIE": 0,
+    "ACC": 0,
     "AEL": 1,
     "AVCM": 1,
-    "AVOM": 1,
+    "AVOM": 0,
     "AVTM": 0
   },
   "n_samples_total": 5,
-  "n_samples_scored": 5,
-  "n_samples_failed": 0,
+  "n_samples_scored": 2,
+  "n_samples_failed": 3,
   "modality_usage_counts": {
     "text": 5,
     "audio": 5,
@@ -33,18 +33,18 @@
   "modality_usage_combos": {
     "text+audio+video": 5
   },
-  "gemini_model_configured": "gemini-2.5-flash-lite",
-  "gemini_model_effective": "gemini-2.5-flash-lite",
-  "pipeline_latency_ms": 138263,
-  "pipeline_latency_s": 138.263,
+  "gemini_model_configured": "gemini-2.5-flash",
+  "gemini_model_effective": "gemini-2.5-flash",
+  "pipeline_latency_ms": 89947,
+  "pipeline_latency_s": 89.947,
   "run_logs": [
     "[AV-Gemini] Start | note=Table 3 right of '/' | samples=5",
     "[AV-Gemini] QA=data/avut/avut_gemini_filtered.jsonl",
     "[AV-Gemini] Metadata=data/avut/hf_raw/AV_Gemini_filtered_data.json",
     "[AV-Gemini] HF_URI=hf://tsinghua-ee/AVUTBenchmark@train",
-    "[AV-Gemini] Model=gemini-2.5-flash-lite",
+    "[AV-Gemini] Model=gemini-2.5-flash",
     "[AV-Gemini] Modality usage: text=5/5 (100.0%), audio=5/5 (100.0%), video=5/5 (100.0%)",
     "[AV-Gemini] Modality combos: text+audio+video=5",
-    "[AV-Gemini] Done | scored=5/5 | acc=0.4000 | latency_ms=138263 | outputs=idea2_predictions_av_gemini.jsonl,idea2_metrics_av_gemini.json"
+    "[AV-Gemini] Done | scored=2/5 | acc=0.0000 | latency_ms=89947 | outputs=idea2_predictions_av_gemini.jsonl,idea2_metrics_av_gemini.json"
   ]
 }

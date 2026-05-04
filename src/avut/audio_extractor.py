@@ -94,17 +94,27 @@ def extract_audio_wav_bytes_from_video_input(
                 src_path = p
 
     # HF video feature may carry bytes with a non-local/invalid path.
-    if src_path is None and isinstance(video_input, dict):
-        raw = video_input.get("bytes")
-        if isinstance(raw, (bytes, bytearray)) and raw:
-            key_b = hashlib.sha1(f"{sample_id}:bytes".encode("utf-8")).hexdigest()[:12]
-            tmp_mp4 = cache_dir / f"{sample_id}_{key_b}.mp4"
-            if not tmp_mp4.exists():
-                try:
-                    tmp_mp4.write_bytes(bytes(raw))
-                except Exception:
-                    return None
-            src_path = tmp_mp4
+    raw_bytes = None
+    if src_path is None and src_uri is None:
+        if isinstance(video_input, dict):
+            raw_b = video_input.get("bytes")
+            if isinstance(raw_b, (bytes, bytearray)) and raw_b:
+                raw_bytes = raw_b
+        if raw_bytes is None:
+            hf_encoded = getattr(video_input, "_hf_encoded", None)
+            if isinstance(hf_encoded, dict):
+                hb = hf_encoded.get("bytes")
+                if isinstance(hb, (bytes, bytearray)) and hb:
+                    raw_bytes = hb
+    if raw_bytes is not None:
+        key_b = hashlib.sha1(f"{sample_id}:bytes".encode("utf-8")).hexdigest()[:12]
+        tmp_mp4 = cache_dir / f"{sample_id}_{key_b}.mp4"
+        if not tmp_mp4.exists():
+            try:
+                tmp_mp4.write_bytes(bytes(raw_bytes))
+            except Exception:
+                return None
+        src_path = tmp_mp4
 
     if src_path is None and src_uri is None:
         return None

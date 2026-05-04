@@ -35,8 +35,8 @@
   },
   "gemini_model_configured": "gemini-2.5-flash-lite",
   "gemini_model_effective": "gemini-2.5-flash-lite",
-  "pipeline_latency_ms": 31534,
-  "pipeline_latency_s": 31.534,
+  "pipeline_latency_ms": 91121,
+  "pipeline_latency_s": 91.121,
   "run_logs": [
     "[AV-Human-basic] Start | note=single sample + single HF video | samples=1",
     "[AV-Human-basic] QA=data/avut/avut_human_filtered.jsonl",
@@ -45,9 +45,9 @@
     "[AV-Human-basic] Model=gemini-2.5-flash-lite",
     "[AV-Human-basic] Modality usage: text=1/1 (100.0%), audio=1/1 (100.0%), video=1/1 (100.0%)",
     "[AV-Human-basic] Modality combos: text+audio+video=1",
-    "[AV-Human-basic] Done | scored=1/1 | acc=0.0000 | latency_ms=31534 | outputs=idea2_predictions_av_human_basic.jsonl,idea2_metrics_av_human_basic.json"
+    "[AV-Human-basic] Done | scored=1/1 | acc=0.0000 | latency_ms=91121 | outputs=idea2_predictions_av_human_basic.jsonl,idea2_metrics_av_human_basic.json"
   ],
-  "sample_id": "5",
-  "sample_video_uri": "/mnt/bn/tiktok-mm-4/aiic/users/yangyudong/AVbenchmark/data/-4I0sW4vR7w.mp4",
+  "sample_id": "2",
+  "sample_video_uri": "/mnt/bn/tiktok-mm-4/aiic/users/yangyudong/AVbenchmark/data/Itc6OFCjJVQ.mp4",
   "sample_video_url_used": "https://huggingface.co/datasets/tsinghua-ee/AVUTBenchmark/resolve/558ca95ac16c972a4de2028fbecef2a8b82fdb00/-4I0sW4vR7w.mp4"
 }

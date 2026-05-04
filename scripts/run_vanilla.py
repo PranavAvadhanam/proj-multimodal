@@ -50,7 +50,16 @@ def parse_args() -> argparse.Namespace:
         "--max-samples",
         type=_positive_int,
         default=None,
-        help="Per-pass cap (default: two passes). Up to N rows from AV-Human pass AND up to N from AV-Gemini pass; each pass task-balanced. Must be positive.",
+        help=(
+            "Sample cap. Default mode runs AV-Human only with up to N rows "
+            "(task-balanced). With --split-max-samples, N is total rows split across "
+            "AV-Human and AV-Gemini."
+        ),
+    )
+    parser.add_argument(
+        "--split-max-samples",
+        action="store_true",
+        help="Run both AV-Human and AV-Gemini, splitting --max-samples across the two passes.",
     )
     parser.add_argument(
         "--run-sample",
@@ -76,6 +85,8 @@ def main() -> None:
     args = parse_args()
     if args.run_sample is not None and args.input is not None:
         raise ValueError("--run-sample cannot be used with --input.")
+    if args.split_max_samples and args.max_samples is None:
+        raise ValueError("--split-max-samples requires --max-samples.")
     metrics = run_vanilla_pipeline(
         args.input,
         output_dir=args.output_dir,
@@ -83,6 +94,7 @@ def main() -> None:
         run_sample=args.run_sample,
         prefetch_videos=args.prefetch_videos,
         no_prefetch_videos=args.no_prefetch_videos,
+        split_max_samples=args.split_max_samples,
     )
     pprint.pprint(metrics)
 

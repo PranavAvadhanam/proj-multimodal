@@ -31,11 +31,12 @@ from src.avut.dataset_basic import load_basic_human_sample
 from src.avut.prompts import (
     audio_perception_prompt,
     build_fixed_mcq_prompt,
+    FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
     text_perception_prompt,
     video_perception_prompt,
 )
 from src.config import Settings, get_settings
-from src.eval.metrics import accuracy, normalize_option
+from src.eval.metrics import accuracy
 from src.mspragcot.client import GeminiClient
 from src.mspragcot.modality_describer import ModalityDescriber
 from src.mspragcot.reasoner import PragReasoner
@@ -313,11 +314,12 @@ def run_idea2_pipeline(
     run_sample: str | None = None,
     prefetch_videos: int | None = None,
     no_prefetch_videos: bool = False,
+    split_max_samples: bool = False,
 ) -> dict:
     """Run Idea 2 pipeline.
 
-    Default: two independent passes (AV-Human / AV-Gemini). HF videos are prefetched once with
-    one progress bar, then each pass uses a green tqdm over samples (Gemini work per row).
+    Default: AV-Human only. Optional split mode runs both AV-Human and AV-Gemini with
+    --max-samples interpreted as a total budget split between passes.
 
     Args:
         input_jsonl: Single-pass QA JSONL override.
@@ -326,6 +328,8 @@ def run_idea2_pipeline(
         prefetch_videos: Max distinct QA videos to resolve from HF (one prefetch bar). None = all
             unique QA_ids needed for the selected passes.
         no_prefetch_videos: Skip Hugging Face streaming entirely (fast for Gemini-only debugging).
+        split_max_samples: If True, run both AV-Human and AV-Gemini and split max_samples across
+            the two passes (requires max_samples). If False (default), run AV-Human only.
     """
     settings = get_settings()
     base_out = Path(output_dir or settings.output_dir)
@@ -364,6 +368,9 @@ def run_idea2_pipeline(
             },
         )
         return {"AV_Human_basic": metrics}
+
+    if split_max_samples and max_samples is None:
+        raise ValueError("--split-max-samples requires --max-samples.")
 
     if input_jsonl is not None:
         print(
@@ -421,13 +428,87 @@ def run_idea2_pipeline(
         )
         return {"single": metrics}
 
+    if split_max_samples:
+        # Total max_samples budget split across AV-Human and AV-Gemini.
+        assert max_samples is not None
+        max_h = (max_samples + 1) // 2
+        max_g = max_samples // 2
+        print(
+            "AVUT split mode: metrics are reported for both AV-Human and AV-Gemini.\n"
+            f"--max-samples={max_samples!r}: total budget split as AV-Human={max_h}, AV-Gemini={max_g}.\n"
+            f"--prefetch-videos={prefetch_videos!r}: caps distinct ids prefetched per side "
+            "(default: all needed on each side). Use --no-prefetch-videos to skip Hub entirely.\n"
+        )
+
+        samples_human = _prepare_pass_samples(
+            pass_label="AV-Human",
+            qa_jsonl_path=settings.qa_human_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_human_json,),
+            max_samples=max_h,
+        )
+        samples_gemini = _prepare_pass_samples(
+            pass_label="AV-Gemini",
+            qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_gemini_json,),
+            max_samples=max_g,
+        )
+        qh = [str(s.sample_id) for s in samples_human]
+        qg = [str(s.sample_id) for s in samples_gemini]
+        if no_prefetch_videos:
+            print("[Prefetch] Skipped (--no-prefetch-videos).\n")
+            vmap_h, vmap_g = {}, {}
+        else:
+            nh, ng = len(set(qh)), len(set(qg))
+            cap_note = (
+                f" (each side capped to {prefetch_videos} id(s))"
+                if prefetch_videos is not None
+                else ""
+            )
+            print(
+                f"[Prefetch] AV-Human {nh} distinct id(s), AV-Gemini {ng} distinct id(s); "
+                f"one HF stream / one bar{cap_note}.\n"
+            )
+            vmap_h, vmap_g = prefetch_hf_avut_train_videos(
+                qh,
+                qg,
+                settings.hf_video_dataset_uri,
+                max_videos=prefetch_videos,
+                desc="Prefetch videos (HF)",
+                human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
+                gemini_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_gemini},
+            )
+        attach_prefetched_videos(samples_human, vmap_h)
+        attach_prefetched_videos(samples_gemini, vmap_g)
+
+        m_human = _run_pass_inference(
+            settings=settings,
+            pass_label="AV-Human",
+            table3_note="Table 3 left of '/'",
+            samples=samples_human,
+            qa_jsonl_path=settings.qa_human_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_human_json,),
+            out_dir=base_out,
+            file_slug="av_human",
+        )
+        m_gemini = _run_pass_inference(
+            settings=settings,
+            pass_label="AV-Gemini",
+            table3_note="Table 3 right of '/'",
+            samples=samples_gemini,
+            qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
+            metadata_paths=(settings.video_metadata_gemini_json,),
+            out_dir=base_out,
+            file_slug="av_gemini",
+        )
+        return {"AV_Human": m_human, "AV_Gemini": m_gemini}
+
+    # Default mode: AV-Human only.
     n = max_samples if max_samples is not None else "all"
     print(
-        "AVUT Table 3 alignment: metrics are reported separately for each side of '/' "
-        "(AV-Human vs AV-Gemini). No mixing of QA or metadata between passes.\n"
-        f"--max-samples={max_samples!r}: up to {n} QA rows **per pass** (task-balanced).\n"
-        f"--prefetch-videos={prefetch_videos!r}: caps distinct ids prefetched **per pass** (Human vs Gemini; "
-        "default: all needed on each side). Use --no-prefetch-videos to skip Hub entirely.\n"
+        "AVUT default mode: running AV-Human only.\n"
+        f"--max-samples={max_samples!r}: up to {n} AV-Human QA rows (task-balanced).\n"
+        f"--prefetch-videos={prefetch_videos!r}: caps AV-Human distinct ids prefetched "
+        "(default: all needed). Use --no-prefetch-videos to skip Hub entirely.\n"
     )
 
     samples_human = _prepare_pass_samples(
@@ -436,61 +517,36 @@ def run_idea2_pipeline(
         metadata_paths=(settings.video_metadata_human_json,),
         max_samples=max_samples,
     )
-    samples_gemini = _prepare_pass_samples(
-        pass_label="AV-Gemini",
-        qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
-        metadata_paths=(settings.video_metadata_gemini_json,),
-        max_samples=max_samples,
-    )
     qh = [str(s.sample_id) for s in samples_human]
-    qg = [str(s.sample_id) for s in samples_gemini]
     if no_prefetch_videos:
         print("[Prefetch] Skipped (--no-prefetch-videos).\n")
-        vmap_h, vmap_g = {}, {}
+        vmap_h = {}
     else:
-        nh, ng = len(set(qh)), len(set(qg))
-        cap_note = (
-            f" (each side capped to {prefetch_videos} id(s))"
-            if prefetch_videos is not None
-            else ""
-        )
-        print(
-            f"[Prefetch] AV-Human {nh} distinct id(s), AV-Gemini {ng} distinct id(s); "
-            f"one HF stream / one bar{cap_note}.\n"
-        )
-        vmap_h, vmap_g = prefetch_hf_avut_train_videos(
+        nh = len(set(qh))
+        cap_note = f" (capped to {prefetch_videos} id(s))" if prefetch_videos is not None else ""
+        print(f"[Prefetch] AV-Human {nh} distinct id(s); one HF stream / one bar{cap_note}.\n")
+        vmap_h, _ = prefetch_hf_avut_train_videos(
             qh,
-            qg,
+            None,
             settings.hf_video_dataset_uri,
             max_videos=prefetch_videos,
             desc="Prefetch videos (HF)",
             human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
-            gemini_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_gemini},
+            gemini_expected_video_by_id=None,
         )
     attach_prefetched_videos(samples_human, vmap_h)
-    attach_prefetched_videos(samples_gemini, vmap_g)
 
     m_human = _run_pass_inference(
         settings=settings,
         pass_label="AV-Human",
-        table3_note="Table 3 left of '/'",
+        table3_note="AV-Human only (default)",
         samples=samples_human,
         qa_jsonl_path=settings.qa_human_filtered_jsonl,
         metadata_paths=(settings.video_metadata_human_json,),
         out_dir=base_out,
         file_slug="av_human",
     )
-    m_gemini = _run_pass_inference(
-        settings=settings,
-        pass_label="AV-Gemini",
-        table3_note="Table 3 right of '/'",
-        samples=samples_gemini,
-        qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
-        metadata_paths=(settings.video_metadata_gemini_json,),
-        out_dir=base_out,
-        file_slug="av_gemini",
-    )
-    return {"AV_Human": m_human, "AV_Gemini": m_gemini}
+    return {"AV_Human": m_human}
 
 
 def _run_pass_inference(
@@ -609,9 +665,15 @@ def _run_pass_inference(
             )
 
             final_prompt = build_fixed_mcq_prompt(sample, context_block=context_block)
-            reasoning_cot = reasoner.reason_and_answer(sample, final_prompt)
-            pred = normalize_option(reasoning_cot)
-            raw_pred = pred
+            pred, reasoning_cot = client.generate_answer_letter(
+                final_prompt,
+                media_input=None,
+                stage="reason_and_answer",
+                extraction_mode="answer_is",
+                max_output_tokens=FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
+                format_retry_attempts=3,
+            )
+            raw_pred = reasoning_cot
 
             preds.append(pred)
             correct.append(sample.answer)

@@ -24,6 +24,9 @@ Generation behavior is configured in `src/config.py` and can be overridden via `
 - `GEMINI_MAX_OUTPUT_TOKENS` (default: `256`) - hard cap for response length.
 - `GEMINI_TIMEOUT_MS` (default: `90000`) - per-request timeout to avoid indefinite network hangs.
 - `GEMINI_SYSTEM_INSTRUCTION` (default: concise MCQ-focused instruction) - global style/verbosity guidance.
+- `VIDEO_SAMPLE_FPS` (default: `0.5`) - ffmpeg downsampling fps before Gemini video upload.
+- `VIDEO_MAX_WIDTH` (default: `640`) - max frame width for upload (aspect ratio preserved).
+- `VIDEO_CRF` (default: `34`) - lossy H.264 quality for smaller upload payloads.
 
 These settings are applied to all Gemini calls (transcription, modality descriptions, decoding, and final reasoning).
 
