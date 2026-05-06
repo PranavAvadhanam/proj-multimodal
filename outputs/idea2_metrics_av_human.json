@@ -5,46 +5,46 @@
   "metadata_json": [
     "data/avut/hf_raw/AV_Human_filtered_data.json"
   ],
-  "accuracy": 0.2,
+  "accuracy": 0.8,
   "task_accuracy": {
-    "AIE": 0.0,
+    "AIE": 1.0,
     "ACC": 1.0,
-    "AEL": 0.0,
-    "AVCM": 0.0,
+    "AEL": 1.0,
+    "AVCM": 1.0,
     "AVOM": 0.0,
     "AVTM": 0.0
   },
   "task_counts_scored": {
-    "AIE": 1,
-    "ACC": 1,
-    "AEL": 1,
-    "AVCM": 1,
+    "AIE": 2,
+    "ACC": 2,
+    "AEL": 2,
+    "AVCM": 2,
     "AVOM": 1,
-    "AVTM": 0
+    "AVTM": 1
   },
-  "n_samples_total": 5,
-  "n_samples_scored": 5,
+  "n_samples_total": 10,
+  "n_samples_scored": 10,
   "n_samples_failed": 0,
   "modality_usage_counts": {
-    "text": 5,
-    "audio": 5,
-    "video": 5
+    "text": 10,
+    "audio": 10,
+    "video": 10
   },
   "modality_usage_combos": {
-    "text+audio+video": 5
+    "text+audio+video": 10
   },
   "gemini_model_configured": "gemini-2.5-flash",
   "gemini_model_effective": "gemini-2.5-flash",
-  "pipeline_latency_ms": 112218,
-  "pipeline_latency_s": 112.218,
+  "pipeline_latency_ms": 938374,
+  "pipeline_latency_s": 938.374,
   "run_logs": [
-    "[AV-Human] Start | note=AV-Human only (default) | samples=5",
+    "[AV-Human] Start | note=AV-Human only (default) | samples=10",
     "[AV-Human] QA=data/avut/avut_human_filtered.jsonl",
     "[AV-Human] Metadata=data/avut/hf_raw/AV_Human_filtered_data.json",
     "[AV-Human] HF_URI=hf://tsinghua-ee/AVUTBenchmark@train",
     "[AV-Human] Model=gemini-2.5-flash",
-    "[AV-Human] Modality usage: text=5/5 (100.0%), audio=5/5 (100.0%), video=5/5 (100.0%)",
-    "[AV-Human] Modality combos: text+audio+video=5",
-    "[AV-Human] Done | scored=5/5 | acc=0.2000 | latency_ms=112218 | outputs=idea2_predictions_av_human.jsonl,idea2_metrics_av_human.json"
+    "[AV-Human] Modality usage: text=10/10 (100.0%), audio=10/10 (100.0%), video=10/10 (100.0%)",
+    "[AV-Human] Modality combos: text+audio+video=10",
+    "[AV-Human] Done | scored=10/10 | acc=0.8000 | latency_ms=938374 | outputs=idea2_predictions_av_human.jsonl,idea2_metrics_av_human.json"
   ]
 }

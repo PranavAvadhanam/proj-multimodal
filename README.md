@@ -45,6 +45,34 @@ Optional faster downloads: install **`hf-transfer`** (already in `requirements.t
 
 To **skip** Hub prefetch entirely (fastest for iterating on Gemini / prompts): `--no-prefetch-videos`.
 
+## Modality Importance Score (MIS, optional)
+
+The `misprompt/` package estimates **empirical modality importance** on a held-out calibration set, then **softmax-normalizes** three MIS values into weights and multiplies them by a fixed total budget (default **768** tokens) to set **`max_output_tokens`** on **audio** and **visual** descriptions in Idea 2 (`src/mspragcot/modality_describer.py`). The text modality is the raw transcript (no describe-length cap from MIS); a **text** entry still appears in `token_allocation.json` to match the three-way MIS definition.
+
+**Score (per modality, averaged over calibration questions):**  
+Take all **non-empty** subsets of `{text, audio, visual}` (seven subsets). For modality **j**, compute **M+**: average MCQ accuracy over subsets that **include** j and have **at least one other** modality (not the singleton `{j}`). Compute **M−**: average accuracy over subsets that **exclude** j. **MIS(j) = M+ − M−**. Each subset is evaluated with a Gemini MCQ call using only the precomputed descriptions available for that subset.
+
+**Separation from evaluation:** MIS picks calibration rows from AV-Human QA **excluding** (1) any `sample_id` already present in `outputs/idea2_predictions_*.jsonl`, and (2) ids accumulated in `outputs/mis/mis_excluded_sample_ids.json`. **Idea 2** applies the same exclusion list before task-balanced sampling so calibration and evaluation rows do not overlap.
+
+**When MIS has not been run**, describe token caps fall back to `GEMINI_MAX_OUTPUT_TOKENS_DESCRIBE` from `.env` / `src/config.py` for each describe call (uniform budget).
+
+Only the **audio** and **visual** counts are used as Gemini caps; the **text** count in the JSON is informational (transcript is not length-limited by MIS).
+
+```bash
+# Calibration: descriptions + 7 subset ablations per question (many Gemini calls).
+python -m misprompt --mis-samples 30 --prefetch-videos 40
+python -m misprompt --mis-samples 10 --no-prefetch-videos --total-token-budget 768
+```
+
+Key outputs (default directory `outputs/mis/`, override with `--output-dir`):
+
+- `token_allocation.json` — softmax weights and **text / audio / visual** token counts (Idea 2 reads this automatically via `OUTPUT_DIR`).
+- `mis_results.json` — raw MIS scores, per-subset accuracies, metadata.
+- `mis_detail.jsonl` — per (sample, subset) correctness traces.
+- `mis_excluded_sample_ids.json` — union of ids reserved for MIS (do not use in Idea 2 eval).
+
+After MIS, run Idea 2 as usual; the pipeline logs the effective **audio / visual** Gemini describe caps (and the **text** figure from the allocation file) at pass start.
+
 ## Run (default: two passes, AVUT Table 3)
 
 By default the script runs **two independent passes** (no mixing), aligned with AVUT Table 3:

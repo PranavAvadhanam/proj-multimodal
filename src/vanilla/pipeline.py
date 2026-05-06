@@ -20,7 +20,6 @@ from src.avut.dataset import (
 from src.avut.dataset_basic import load_basic_human_sample
 from src.config import Settings, get_settings
 from src.avut.prompts import (
-    FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
     final_mcq_answer_format_prompt,
     vanilla_mcq_answer_preamble_prompt,
 )
@@ -198,29 +197,22 @@ def run_vanilla_pipeline(
             ),
             max_samples=max_samples,
         )
-        qa_ids = [s.sample_id for s in samples]
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
             vmap = {}
         else:
-            cap = prefetch_videos if prefetch_videos is not None else len(set(qa_ids))
+            n_vids = len({s.video_id or s.sample_id for s in samples})
             print(
-                f"[Prefetch] Resolving up to {cap} distinct HF video(s) for {len(samples)} sample row(s) "
+                f"[Prefetch] Resolving up to {n_vids} distinct video_id(s) for {len(samples)} sample row(s) "
                 f"(streaming, one bar).\n"
             )
             use_gemini = "gemini" in Path(input_jsonl).name.lower()
             oh, og = prefetch_hf_avut_train_videos(
-                None if use_gemini else qa_ids,
-                qa_ids if use_gemini else None,
+                None if use_gemini else samples,
+                samples if use_gemini else None,
                 settings.hf_video_dataset_uri,
                 max_videos=prefetch_videos,
                 desc="Prefetch videos (HF)",
-                human_expected_video_by_id=(
-                    {str(s.sample_id): s.video_path or "" for s in samples} if not use_gemini else None
-                ),
-                gemini_expected_video_by_id=(
-                    {str(s.sample_id): s.video_path or "" for s in samples} if use_gemini else None
-                ),
             )
             vmap = og if use_gemini else oh
         attach_prefetched_videos(samples, vmap)
@@ -262,30 +254,27 @@ def run_vanilla_pipeline(
             metadata_paths=(settings.video_metadata_gemini_json,),
             max_samples=max_g,
         )
-        qh = [str(s.sample_id) for s in samples_human]
-        qg = [str(s.sample_id) for s in samples_gemini]
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
             vmap_h, vmap_g = {}, {}
         else:
-            nh, ng = len(set(qh)), len(set(qg))
+            nh = len({s.video_id or s.sample_id for s in samples_human})
+            ng = len({s.video_id or s.sample_id for s in samples_gemini})
             cap_note = (
-                f" (each side capped to {prefetch_videos} id(s))"
+                f" (each side capped to {prefetch_videos} video_id(s))"
                 if prefetch_videos is not None
                 else ""
             )
             print(
-                f"[Prefetch] AV-Human {nh} distinct id(s), AV-Gemini {ng} distinct id(s); "
+                f"[Prefetch] AV-Human {nh} distinct video_id(s), AV-Gemini {ng} distinct video_id(s); "
                 f"one HF stream / one bar{cap_note}.\n"
             )
             vmap_h, vmap_g = prefetch_hf_avut_train_videos(
-                qh,
-                qg,
+                samples_human,
+                samples_gemini,
                 settings.hf_video_dataset_uri,
                 max_videos=prefetch_videos,
                 desc="Prefetch videos (HF)",
-                human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
-                gemini_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_gemini},
             )
         attach_prefetched_videos(samples_human, vmap_h)
         attach_prefetched_videos(samples_gemini, vmap_g)
@@ -327,22 +316,19 @@ def run_vanilla_pipeline(
         metadata_paths=(settings.video_metadata_human_json,),
         max_samples=max_samples,
     )
-    qh = [str(s.sample_id) for s in samples_human]
     if no_prefetch_videos:
         print("[Prefetch] Skipped (--no-prefetch-videos).\n")
         vmap_h = {}
     else:
-        nh = len(set(qh))
-        cap_note = f" (capped to {prefetch_videos} id(s))" if prefetch_videos is not None else ""
-        print(f"[Prefetch] AV-Human {nh} distinct id(s); one HF stream / one bar{cap_note}.\n")
+        n_vids = len({s.video_id or s.sample_id for s in samples_human})
+        cap_note = f" (capped to {prefetch_videos} video_id(s))" if prefetch_videos is not None else ""
+        print(f"[Prefetch] AV-Human {n_vids} distinct video_id(s); one HF stream / one bar{cap_note}.\n")
         vmap_h, _ = prefetch_hf_avut_train_videos(
-            qh,
+            samples_human,
             None,
             settings.hf_video_dataset_uri,
             max_videos=prefetch_videos,
             desc="Prefetch videos (HF)",
-            human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
-            gemini_expected_video_by_id=None,
         )
     attach_prefetched_videos(samples_human, vmap_h)
 
@@ -429,15 +415,20 @@ def _run_pass_inference(
                     media_input=sample.video_input,
                     stage="vanilla_answer",
                     extraction_mode="answer_is",
-                    max_output_tokens=FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
-                    format_retry_attempts=3,
+                    max_output_tokens=settings.max_output_tokens_vanilla_answer,
+                    format_retry_attempts=settings.format_retry_attempts,
+                    max_repair_attempts=settings.max_repair_attempts,
                 )
                 raw_pred = raw_text
-                preds.append(pred)
-                correct.append(sample.answer)
-                task_code = sample.task_code or "UNKNOWN"
-                per_task_gold.setdefault(task_code, []).append(sample.answer)
-                per_task_pred.setdefault(task_code, []).append(pred)
+                if pred in {"A", "B", "C", "D"}:
+                    preds.append(pred)
+                    correct.append(sample.answer)
+                    task_code = sample.task_code or "UNKNOWN"
+                    per_task_gold.setdefault(task_code, []).append(sample.answer)
+                    per_task_pred.setdefault(task_code, []).append(pred)
+                else:
+                    status = "error"
+                    error = "parse_error: no valid [ANSWER] letter extracted"
         except Exception as exc:
             status = "error"
             error = str(exc)
@@ -507,7 +498,13 @@ def _run_pass_inference(
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    divider = {
+        "_run_divider": "============================================================",
+        "run_started_unix_ms": int(time.time() * 1000),
+        "file": path.name,
+    }
     with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(divider, ensure_ascii=False) + "\n")
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 

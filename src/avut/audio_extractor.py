@@ -73,6 +73,7 @@ def extract_audio_wav_bytes_from_video_input(
     video_input: object | None,
     sample_id: str,
     cache_dir: Path,
+    max_duration_seconds: int | None = None,
 ) -> bytes | None:
     """Extract mono 16k WAV via ffmpeg and return raw wav bytes.
 
@@ -120,7 +121,8 @@ def extract_audio_wav_bytes_from_video_input(
         return None
 
     key_src = src_uri if src_uri is not None else str(src_path.resolve())
-    key = hashlib.sha1(f"{sample_id}:{key_src}".encode("utf-8")).hexdigest()[:12]
+    duration_key = f":t{max_duration_seconds}" if max_duration_seconds else ""
+    key = hashlib.sha1(f"{sample_id}:{key_src}{duration_key}".encode("utf-8")).hexdigest()[:12]
     out_wav = cache_dir / f"{sample_id}_{key}.wav"
 
     if not out_wav.exists():
@@ -130,15 +132,23 @@ def extract_audio_wav_bytes_from_video_input(
             "-y",
             "-i",
             src_uri if src_uri is not None else str(src_path),
+        ]
+        if max_duration_seconds is not None and max_duration_seconds > 0:
+            cmd.extend(["-t", str(max_duration_seconds)])
+        cmd.extend(
+            [
             "-vn",
             "-ac",
             "1",
             "-ar",
             "16000",
+            "-af",
+            "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-f",
             "wav",
             str(out_wav),
-        ]
+            ]
+        )
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:

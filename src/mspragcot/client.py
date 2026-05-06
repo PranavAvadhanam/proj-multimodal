@@ -32,8 +32,13 @@ class GeminiClient:
         self._media_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _generation_config(
-        self, *, max_output_tokens: int | None = None
+        self,
+        *,
+        max_output_tokens: int | None = None,
+        thinking_budget: int | None = None,
     ) -> types.GenerateContentConfig:
+        tb = thinking_budget if thinking_budget is not None else self._settings.thinking_budget
+        thinking = types.ThinkingConfig(thinking_budget=tb) if tb >= 0 else None
         return types.GenerateContentConfig(
             temperature=self._settings.temperature,
             max_output_tokens=(
@@ -42,6 +47,7 @@ class GeminiClient:
                 else self._settings.max_output_tokens
             ),
             system_instruction=self._settings.system_instruction,
+            thinking_config=thinking,
         )
 
     @property
@@ -51,6 +57,13 @@ class GeminiClient:
     def set_run_context(self, **context: object) -> None:
         """Attach context fields included on every subsequent call metric event."""
         self._run_context = dict(context)
+
+    def _task_code(self) -> str:
+        tc = str(self._run_context.get("task_code") or "").upper().strip()
+        return tc
+
+    def _is_alignment_task(self) -> bool:
+        return self._task_code() in {"AVOM", "AVSM", "AEL"}
 
     def _media_kind(self, media_input: object | None) -> str:
         if media_input is None:
@@ -119,12 +132,18 @@ class GeminiClient:
 
     def _sampled_video_path(self, src: str) -> str | None:
         """Create a low-fps, lower-resolution cached MP4 for faster Gemini uploads."""
-        if self._settings.video_sample_fps <= 0:
+        is_alignment = self._is_alignment_task()
+        fps = (
+            self._settings.video_sample_fps_alignment
+            if is_alignment
+            else self._settings.video_sample_fps
+        )
+        if fps <= 0:
             return src
         key = hashlib.sha1(
             (
-                f"{src}|fps={self._settings.video_sample_fps}|w={self._settings.video_max_width}|"
-                f"crf={self._settings.video_crf}"
+                f"{src}|fps={fps}|w={self._settings.video_max_width}|"
+                f"crf={self._settings.video_crf}|task={self._task_code()}"
             ).encode("utf-8")
         ).hexdigest()[:16]
         out_path = self._media_cache_dir / f"sampled_{key}.mp4"
@@ -132,7 +151,7 @@ class GeminiClient:
             return str(out_path)
         # Keep aspect ratio, force even dimensions for encoder compatibility.
         vf = (
-            f"fps={self._settings.video_sample_fps},"
+            f"fps={fps},"
             f"scale='min(iw,{self._settings.video_max_width})':-2:flags=bicubic"
         )
         cmd = [
@@ -153,8 +172,16 @@ class GeminiClient:
             "yuv420p",
             "-c:a",
             "aac",
+            "-af",
+            "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "aac",
             "-b:a",
-            "48k",
+            "128k",
             str(out_path),
         ]
         try:
@@ -176,6 +203,22 @@ class GeminiClient:
             mime_type=self._guess_mime(mime_hint, "video/mp4"),
         )
 
+    def _process_video_bytes(self, raw: bytes, _name_hint: str = "") -> types.Part:
+        """Save raw video bytes to disk, run through ffmpeg preprocessing, return Part."""
+        key = hashlib.sha1(raw[:4096]).hexdigest()[:16]
+        tmp = self._media_cache_dir / f"hfraw_{key}.mp4"
+        if not tmp.exists():
+            tmp.write_bytes(raw)
+        sampled = self._sampled_video_path(str(tmp))
+        if sampled:
+            sp = Path(sampled)
+            if sp.exists():
+                return types.Part.from_bytes(
+                    data=sp.read_bytes(),
+                    mime_type=self._guess_mime(str(sp), "video/mp4"),
+                )
+        return types.Part.from_bytes(data=raw, mime_type="video/mp4")
+
     def _as_media_part(self, media_input: object) -> object | None:
         """Normalize local-path / dict media to a Gemini Part.
 
@@ -191,8 +234,7 @@ class GeminiClient:
             hfp = hf_encoded.get("path")
             hfb = hf_encoded.get("bytes")
             if isinstance(hfb, (bytes, bytearray)):
-                mime = self._guess_mime(str(hfp), fallback="video/mp4")
-                return types.Part.from_bytes(data=bytes(hfb), mime_type=mime)
+                return self._process_video_bytes(bytes(hfb), _name_hint=str(hfp))
             if isinstance(hfp, str):
                 if hfp.startswith("hf://datasets/"):
                     resolved = self._hf_to_https(hfp, mode="resolve")
@@ -205,8 +247,7 @@ class GeminiClient:
             b = media_input.get("bytes")
             p = media_input.get("path")
             if isinstance(b, (bytes, bytearray)):
-                mime = self._guess_mime(str(p), fallback="video/mp4")
-                return types.Part.from_bytes(data=bytes(b), mime_type=mime)
+                return self._process_video_bytes(bytes(b), _name_hint=str(p))
             if isinstance(p, str):
                 if p.startswith("hf://datasets/"):
                     resolved = self._hf_to_https(p, mode="resolve")
@@ -222,12 +263,6 @@ class GeminiClient:
                         data=sp.read_bytes(),
                         mime_type=self._guess_mime(str(sp), fallback="video/mp4"),
                     )
-                if path.is_absolute():
-                    # Best-effort file URI for non-workspace absolute paths.
-                    return types.Part.from_uri(
-                        file_uri=f"file://{path}",
-                        mime_type=self._guess_mime(str(path), "video/mp4"),
-                    )
 
         if isinstance(media_input, str):
             if "://" in media_input:
@@ -239,11 +274,6 @@ class GeminiClient:
                 return types.Part.from_bytes(
                     data=sp.read_bytes(),
                     mime_type=self._guess_mime(str(sp), fallback="video/mp4"),
-                )
-            if path.is_absolute():
-                return types.Part.from_uri(
-                    file_uri=f"file://{path}",
-                    mime_type=self._guess_mime(str(path), "video/mp4"),
                 )
 
         p_attr = getattr(media_input, "path", None)
@@ -257,12 +287,6 @@ class GeminiClient:
                 return types.Part.from_bytes(
                     data=sp.read_bytes(),
                     mime_type=self._guess_mime(str(sp), fallback="video/mp4"),
-                )
-            if path.is_absolute():
-                return types.Part.from_uri(
-                    file_uri=f"file://{path}",
-                    mime_type=self._guess_mime(str(path), "video/mp4"),
-
                 )
 
         return None
@@ -293,6 +317,7 @@ class GeminiClient:
         *,
         stage: str = "unspecified",
         max_output_tokens: int | None = None,
+        thinking_budget: int | None = None,
     ) -> str:
         """Args: prompt text and optional single-modality media input. Returns: model text output."""
         t0 = time.perf_counter()
@@ -311,6 +336,7 @@ class GeminiClient:
                 "has_media_input": media_input is not None,
                 "media_kind": self._media_kind(media_input),
                 "max_output_tokens_effective": eff_max_out,
+                "thinking_budget_effective": thinking_budget if thinking_budget is not None else self._settings.thinking_budget,
             },
         )
         contents: list[object] = [prompt]
@@ -348,7 +374,10 @@ class GeminiClient:
                 response = self._client.models.generate_content(
                     model=self._settings.gemini_model,
                     contents=contents,
-                    config=self._generation_config(max_output_tokens=max_output_tokens),
+                    config=self._generation_config(
+                        max_output_tokens=max_output_tokens,
+                        thinking_budget=thinking_budget,
+                    ),
                 )
                 break
             except Exception as exc:
@@ -422,24 +451,22 @@ class GeminiClient:
         extraction_mode: str = "single_letter",
         max_output_tokens: int | None = None,
         format_retry_attempts: int = 3,
-        idea2_answer_is_max_tokens: int = 250,
+        thinking_budget: int | None = None,
     ) -> tuple[str, str]:
         """Generate final MCQ letter with retries.
 
         extraction_mode ``single_letter``: reply must be one letter; repair fixes format.
-        extraction_mode ``answer_is``: reply must contain substring ``Answer is X``;
-        uses ``idea2_answer_is_max_tokens`` (default 250) when ``max_output_tokens`` is omitted,
-        with parse-miss retries and text repair.
+        extraction_mode ``answer_is``: reply must contain substring ``Answer is X``.
+
+        Token caps are resolved from ``max_output_tokens`` (caller must supply via
+        settings.max_output_tokens_idea2_answer or settings.max_output_tokens_vanilla_answer)
+        or falls back to the global settings.max_output_tokens.
 
         Returns:
             (letter, raw_text_for_logging)
         """
         if extraction_mode == "answer_is":
-            cap = (
-                max_output_tokens
-                if max_output_tokens is not None
-                else idea2_answer_is_max_tokens
-            )
+            cap = max_output_tokens
             raw = ""
             for i in range(format_retry_attempts):
                 st = stage if i == 0 else f"{stage}_format_retry_{i+1}"
@@ -448,6 +475,7 @@ class GeminiClient:
                     media_input=media_input,
                     stage=st,
                     max_output_tokens=cap,
+                    thinking_budget=thinking_budget,
                 )
                 letter = extract_final_answer_letter(raw)
                 if letter:

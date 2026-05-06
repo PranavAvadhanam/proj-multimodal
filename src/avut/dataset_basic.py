@@ -37,12 +37,11 @@ def load_basic_human_sample(settings: Settings, sample_id: str | None = None) ->
                 f"AV-Human sample_id={sample_id!r} not found in {settings.qa_human_filtered_jsonl}."
             )
     human_map, _ = prefetch_hf_avut_train_videos(
-        [str(sample.sample_id)],
+        [sample],
         None,
         settings.hf_video_dataset_uri,
         max_videos=1,
         desc="Prefetch videos (HF basic)",
-        human_expected_video_by_id={str(sample.sample_id): sample.video_path or ""},
     )
     attach_prefetched_videos([sample], human_map)
     return [sample]

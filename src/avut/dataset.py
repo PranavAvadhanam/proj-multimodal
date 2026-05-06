@@ -21,6 +21,7 @@ class MCQSample:
     option_c: str
     option_d: str
     answer: str
+    video_id: str | None = None
     transcript: str | None = None
     video_path: str | None = None
     audio_path: str | None = None
@@ -49,6 +50,7 @@ def load_samples(jsonl_path: str | Path) -> list[MCQSample]:
             if not line.strip():
                 continue
             row = json.loads(line)
+            vid_raw = row.get("video_id")
             rows.append(
                 MCQSample(
                     sample_id=str(row["sample_id"]),
@@ -58,6 +60,7 @@ def load_samples(jsonl_path: str | Path) -> list[MCQSample]:
                     option_c=row["option_c"],
                     option_d=row["option_d"],
                     answer=row["answer"],
+                    video_id=str(vid_raw) if vid_raw is not None else None,
                     transcript=row.get("transcript"),
                     video_path=row.get("video_path"),
                     audio_path=row.get("audio_path"),
@@ -90,6 +93,8 @@ def enrich_samples_from_metadata(samples: list[MCQSample], metadata_json_path: s
         meta = by_id.get(str(s.sample_id))
         if not meta:
             continue
+        if not s.video_id and meta.get("video_id") is not None:
+            s.video_id = str(meta["video_id"])
         if not s.task_type:
             s.task_type = meta.get("task_type")
         if not s.task_code:
@@ -118,65 +123,6 @@ def _parse_hf_uri(hf_uri: str) -> tuple[str, str]:
     return repo_id, split
 
 
-def _avut_human_prefix_rows() -> int:
-    """How many leading ``train`` rows belong to AV-Human (1-based ``sample_id`` = row+1).
-
-    Remaining rows are AV-Gemini (``sample_id`` = row_index − this value). Override if your
-    Hub revision differs: ``HF_AVUT_HUMAN_ROW_COUNT``.
-    """
-    return int(os.environ.get("HF_AVUT_HUMAN_ROW_COUNT", "1734"))
-
-
-def _uniq_ids(ids: list[str] | None, max_videos: int | None) -> set[str]:
-    """Dedupe string ids, sort for stable cap, then keep at most ``max_videos`` (per side)."""
-    u = sorted({str(x) for x in (ids or []) if x})
-    if max_videos is not None:
-        u = u[: max(0, max_videos)]
-    return set(u)
-
-
-def _row_keys_human_gemini(
-    idx: int,
-    target_h: set[str],
-    target_g: set[str],
-    *,
-    human_rows: int,
-    row: dict,
-) -> tuple[list[str], list[str]]:
-    """Map stream row ``idx`` to Human and/or Gemini ``sample_id`` keys still wanted.
-
-    Prefer explicit id columns when present. Otherwise use AVUT train layout: Human
-    ``sample_id`` = ``idx + 1`` for ``idx < human_rows``; Gemini ``sample_id`` = ``idx - human_rows``.
-    Returns ``(human_keys, gemini_keys)`` to fetch for this row (may be empty).
-    """
-    for col in ("QA_id", "sample_id", "qa_id", "id"):
-        if col in row and row[col] is not None:
-            k = str(row[col])
-            if k not in target_h and k not in target_g:
-                return [], []
-            kh: list[str] = []
-            kg: list[str] = []
-            if k in target_h:
-                kh.append(k)
-            if k in target_g:
-                kg.append(k)
-            return kh, kg
-    if "video" not in row:
-        return [], []
-    kh: list[str] = []
-    kg: list[str] = []
-    if idx < human_rows:
-        h = str(idx + 1)
-        if h in target_h:
-            kh.append(h)
-    g = idx - human_rows
-    if g >= 0:
-        gs = str(g)
-        if gs in target_g:
-            kg.append(gs)
-    return kh, kg
-
-
 def _video_filename_from_obj(video_obj: object) -> str | None:
     """Best-effort basename extraction from datasets video feature payload."""
     if isinstance(video_obj, dict):
@@ -191,48 +137,84 @@ def _video_filename_from_obj(video_obj: object) -> str | None:
     return None
 
 
+def _build_video_id_maps(
+    samples: list[MCQSample] | None,
+) -> tuple[dict[str, list[str]], dict[str, str], dict[str, str]]:
+    """From a list of samples build three lookup dicts keyed by ``video_id``.
+
+    Returns:
+        ``(vid_to_sids, vid_to_filename, sid_to_vid)``
+        - ``vid_to_sids``: ``video_id`` → list of ``sample_id`` strings needing that video.
+        - ``vid_to_filename``: ``video_id`` → expected video basename (from ``video_path``).
+        - ``sid_to_vid``: ``sample_id`` → ``video_id`` (reverse lookup).
+    """
+    vid_to_sids: dict[str, list[str]] = defaultdict(list)
+    vid_to_filename: dict[str, str] = {}
+    sid_to_vid: dict[str, str] = {}
+    for s in (samples or []):
+        vid = s.video_id or str(s.sample_id)
+        sid = str(s.sample_id)
+        vid_to_sids[vid].append(sid)
+        sid_to_vid[sid] = vid
+        if s.video_path and vid not in vid_to_filename:
+            vid_to_filename[vid] = Path(s.video_path).name
+    return dict(vid_to_sids), vid_to_filename, sid_to_vid
+
+
 def prefetch_hf_avut_train_videos(
-    human_qa_ids: list[str] | None,
-    gemini_qa_ids: list[str] | None,
+    human_samples: list[MCQSample] | None,
+    gemini_samples: list[MCQSample] | None,
     hf_uri: str,
-    max_videos: int | None,
+    max_videos: int | None = None,
     desc: str = "Prefetch videos (HF)",
-    human_expected_video_by_id: dict[str, str] | None = None,
-    gemini_expected_video_by_id: dict[str, str] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Stream Hub ``train`` into two ``sample_id`` → ``video`` maps (Human vs Gemini).
-    
-    ``hf_uri`` must start with ``hf://``. Uses authenticated Hub token when set. Stops once
-    both target sets are filled. Reads ``row[\"video\"]`` only when that row matches at least
-    one requested id.
+
+    Keyed entirely by ``video_id``: one HF video per unique ``video_id``, then fanned out
+    to every ``sample_id`` sharing that ``video_id``. ``sample_id`` is **not** used for
+    matching HF rows.
+
+    Matching priority per HF row:
+      1. Video filename from the HF row's video object matches an expected filename
+         derived from ``video_path`` in the QA metadata.
+      2. Explicit ``video_id`` column in the HF row matches a target ``video_id``.
+      3. ``QA_id`` / ``sample_id`` column in the HF row → reverse-lookup to ``video_id``.
 
     Args:
-        human_qa_ids: AV-Human ``sample_id`` strings to resolve (or ``None``).
-        gemini_qa_ids: AV-Gemini ``sample_id`` strings to resolve (or ``None``).
+        human_samples: AV-Human ``MCQSample`` list (or ``None``).
+        gemini_samples: AV-Gemini ``MCQSample`` list (or ``None``).
         hf_uri: e.g. ``hf://tsinghua-ee/AVUTBenchmark@train``.
-        max_videos: Cap distinct ids per side after dedupe (``None`` = all listed).
+        max_videos: Cap distinct *video_ids* per side (``None`` = all needed).
         desc: tqdm description.
 
     Returns:
-        ``(human_id_to_video, gemini_id_to_video)``; empty dicts on bad URI or import failure.
+        ``(human_sid_to_video, gemini_sid_to_video)``; empty dicts on bad URI or import
+        failure.
     """
     if not hf_uri.startswith("hf://"):
         return {}, {}
 
-    target_h = _uniq_ids(human_qa_ids, max_videos)
-    target_g = _uniq_ids(gemini_qa_ids, max_videos)
-    expected_h = {
-        str(k): Path(v).name
-        for k, v in (human_expected_video_by_id or {}).items()
-        if str(k) in target_h and isinstance(v, str) and v
-    }
-    expected_g = {
-        str(k): Path(v).name
-        for k, v in (gemini_expected_video_by_id or {}).items()
-        if str(k) in target_g and isinstance(v, str) and v
-    }
-    if not target_h and not target_g:
+    h_vid_to_sids, h_vid_to_fn, h_sid_to_vid = _build_video_id_maps(human_samples)
+    g_vid_to_sids, g_vid_to_fn, g_sid_to_vid = _build_video_id_maps(gemini_samples)
+
+    target_h_vids = set(sorted(h_vid_to_sids.keys()))
+    target_g_vids = set(sorted(g_vid_to_sids.keys()))
+    if max_videos is not None:
+        target_h_vids = set(sorted(target_h_vids)[:max_videos])
+        target_g_vids = set(sorted(target_g_vids)[:max_videos])
+
+    if not target_h_vids and not target_g_vids:
         return {}, {}
+
+    # Reverse filename → video_id for fast lookup during streaming.
+    h_fn_to_vid: dict[str, str] = {}
+    for vid, fn in h_vid_to_fn.items():
+        if vid in target_h_vids:
+            h_fn_to_vid.setdefault(fn, vid)
+    g_fn_to_vid: dict[str, str] = {}
+    for vid, fn in g_vid_to_fn.items():
+        if vid in target_g_vids:
+            g_fn_to_vid.setdefault(fn, vid)
 
     try:
         from datasets import DownloadConfig, Video, load_dataset
@@ -243,81 +225,117 @@ def prefetch_hf_avut_train_videos(
     repo_id, split = _parse_hf_uri(hf_uri)
     token = _hf_token()
     dl_cfg = DownloadConfig(max_retries=5)
-    human_rows = _avut_human_prefix_rows()
 
-    out_h: dict[str, object] = {}
-    out_g: dict[str, object] = {}
-    ds = load_dataset(
-        repo_id,
-        split=split,
-        streaming=True,
-        token=token,
-        download_config=dl_cfg,
-    )
-    # Avoid expensive video decoding during prefetch; we only need lightweight path metadata.
+    found_h: dict[str, object] = {}  # video_id → video obj
+    found_g: dict[str, object] = {}
+
+    ds = load_dataset(repo_id, split=split, streaming=True, token=token, download_config=dl_cfg)
     if "video" in getattr(ds, "features", {}):
         ds = ds.cast_column("video", Video(decode=False))
 
-    total = len(target_h) + len(target_g)
-    pbar = tqdm(total=total, desc=desc, unit="video", dynamic_ncols=True)
-    for idx, row in enumerate(ds):
-        if len(out_h) >= len(target_h) and len(out_g) >= len(target_g):
+    total_target = len(target_h_vids) + len(target_g_vids)
+    pbar = tqdm(total=total_target, desc=desc, unit="video", dynamic_ncols=True)
+
+    for _idx, row in enumerate(ds):
+        if len(found_h) >= len(target_h_vids) and len(found_g) >= len(target_g_vids):
             break
-        kh, kg = _row_keys_human_gemini(idx, target_h, target_g, human_rows=human_rows, row=row)
-        vid = row.get("video")
-        if vid is None:
+        vid_obj = row.get("video")
+        if vid_obj is None:
             continue
-        vid_name = _video_filename_from_obj(vid)
-        if expected_h:
-            # Prefer metadata filename matching, but retain row-index/id fallback when no
-            # filename match is found (dataset revisions can rename/rehash media paths).
-            matched_h = [
-                sid for sid, expected_name in expected_h.items() if sid not in out_h and expected_name == vid_name
-            ]
-            if matched_h:
-                kh = matched_h
-        elif vid_name:
-            for sid, expected_name in expected_h.items():
-                if sid not in out_h and expected_name == vid_name:
-                    kh.append(sid)
-        if expected_g:
-            # Prefer metadata filename matching, but retain row-index/id fallback when no
-            # filename match is found (dataset revisions can rename/rehash media paths).
-            matched_g = [
-                sid for sid, expected_name in expected_g.items() if sid not in out_g and expected_name == vid_name
-            ]
-            if matched_g:
-                kg = matched_g
-        elif vid_name:
-            for sid, expected_name in expected_g.items():
-                if sid not in out_g and expected_name == vid_name:
-                    kg.append(sid)
-        if not kh and not kg:
-            continue
-        for k in kh:
-            if k not in out_h:
-                out_h[k] = vid
-                pbar.update(1)
-        for k in kg:
-            if k not in out_g:
-                out_g[k] = vid
-                pbar.update(1)
-        if len(out_h) >= len(target_h) and len(out_g) >= len(target_g):
-            break
+
+        vid_name = _video_filename_from_obj(vid_obj)
+        matched_h: str | None = None
+        matched_g: str | None = None
+
+        # Strategy 1: match by video filename → video_id
+        if vid_name:
+            h_cand = h_fn_to_vid.get(vid_name)
+            if h_cand and h_cand in target_h_vids and h_cand not in found_h:
+                matched_h = h_cand
+            g_cand = g_fn_to_vid.get(vid_name)
+            if g_cand and g_cand in target_g_vids and g_cand not in found_g:
+                matched_g = g_cand
+
+        # Strategy 2: explicit video_id column in the HF row
+        if matched_h is None or matched_g is None:
+            row_vid = row.get("video_id")
+            if row_vid is not None:
+                k = str(row_vid)
+                if matched_h is None and k in target_h_vids and k not in found_h:
+                    matched_h = k
+                if matched_g is None and k in target_g_vids and k not in found_g:
+                    matched_g = k
+
+        # Strategy 3: QA_id / sample_id column → reverse-lookup to video_id
+        if matched_h is None or matched_g is None:
+            for col in ("QA_id", "sample_id", "qa_id", "id"):
+                if col in row and row[col] is not None:
+                    qa_key = str(row[col])
+                    if matched_h is None:
+                        h_vid_for_qa = h_sid_to_vid.get(qa_key)
+                        if h_vid_for_qa and h_vid_for_qa in target_h_vids and h_vid_for_qa not in found_h:
+                            matched_h = h_vid_for_qa
+                    if matched_g is None:
+                        g_vid_for_qa = g_sid_to_vid.get(qa_key)
+                        if g_vid_for_qa and g_vid_for_qa in target_g_vids and g_vid_for_qa not in found_g:
+                            matched_g = g_vid_for_qa
+                    break
+
+        if matched_h is not None:
+            found_h[matched_h] = vid_obj
+            pbar.update(1)
+        if matched_g is not None:
+            found_g[matched_g] = vid_obj
+            pbar.update(1)
+
     pbar.close()
+
+    # --- Safety net: verify filename consistency across video_ids ---
+    for label, found, vid_to_fn in [
+        ("Human", found_h, h_vid_to_fn),
+        ("Gemini", found_g, g_vid_to_fn),
+    ]:
+        for vid, obj in found.items():
+            actual = _video_filename_from_obj(obj)
+            expected = vid_to_fn.get(vid)
+            if actual and expected and actual != expected:
+                import warnings
+                warnings.warn(
+                    f"[{label}] video_id={vid}: HF filename {actual!r} != "
+                    f"expected {expected!r} from metadata. Using HF object anyway.",
+                    stacklevel=2,
+                )
+
+    # --- Fan-out: video_id → video to sample_id → video ---
+    out_h: dict[str, object] = {}
+    for vid, obj in found_h.items():
+        for sid in h_vid_to_sids.get(vid, []):
+            out_h[sid] = obj
+
+    out_g: dict[str, object] = {}
+    for vid, obj in found_g.items():
+        for sid in g_vid_to_sids.get(vid, []):
+            out_g[sid] = obj
+
+    h_found_sids = len(out_h)
+    h_total_sids = sum(len(sids) for v, sids in h_vid_to_sids.items() if v in target_h_vids)
+    g_found_sids = len(out_g)
+    g_total_sids = sum(len(sids) for v, sids in g_vid_to_sids.items() if v in target_g_vids)
+    print(
+        f"[Prefetch] Resolved: Human {len(found_h)}/{len(target_h_vids)} video_ids "
+        f"→ {h_found_sids}/{h_total_sids} samples, "
+        f"Gemini {len(found_g)}/{len(target_g_vids)} video_ids "
+        f"→ {g_found_sids}/{g_total_sids} samples"
+    )
+
     return out_h, out_g
 
 
-def attach_prefetched_videos(samples: list[MCQSample], video_by_qa: dict[str, object]) -> None:
-    """Set ``video_input`` on each sample whose ``sample_id`` appears in ``video_by_qa``."""
+def attach_prefetched_videos(samples: list[MCQSample], video_by_sid: dict[str, object]) -> None:
+    """Set ``video_input`` on each sample whose ``sample_id`` appears in ``video_by_sid``."""
     for s in samples:
-        v = video_by_qa.get(str(s.sample_id))
+        v = video_by_sid.get(str(s.sample_id))
         if v is not None:
-            # Prefer the prefetched HF object for this QA id even when the metadata basename
-            # does not match the Hub filename (e.g. stale server-side paths vs re-keyed uploads).
-            # Skipping attachment left ``video_input`` unset and routed inference to bogus
-            # metadata paths such as ``/mnt/...`` that exist only on upstream hosts, which
-            # breaks ffmpeg-based transcription while Gemini may still appear "usable".
             s.video_input = v
 
 

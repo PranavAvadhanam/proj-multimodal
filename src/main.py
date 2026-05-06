@@ -27,18 +27,19 @@ from src.avut.dataset import (
     prefetch_hf_avut_train_videos,
     representative_even_sample,
 )
+from misprompt.separation import filter_excluded_samples, load_mis_exclusion_ids
 from src.avut.dataset_basic import load_basic_human_sample
 from src.avut.prompts import (
     audio_perception_prompt,
     build_fixed_mcq_prompt,
-    FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
     text_perception_prompt,
     video_perception_prompt,
 )
 from src.config import Settings, get_settings
 from src.eval.metrics import accuracy
 from src.mspragcot.client import GeminiClient
-from src.mspragcot.modality_describer import ModalityDescriber
+from src.mspragcot.modality_describer import ModalityDescriber, PerModalityBudget
+from misprompt.token_budget import load_token_budget
 from src.mspragcot.reasoner import PragReasoner
 
 
@@ -216,6 +217,7 @@ def _prepare_modalities_for_sample(
     sample: MCQSample,
     client: GeminiClient,
     audio_cache_dir: Path,
+    settings: Settings,
 ) -> dict[str, bool]:
     """Prepare transcript/audio inputs before describe_* calls.
 
@@ -243,7 +245,15 @@ def _prepare_modalities_for_sample(
                 video_input=sample.video_input,
                 sample_id=str(sample.sample_id),
                 cache_dir=audio_cache_dir,
+                max_duration_seconds=settings.max_audio_duration_seconds,
             )
+            if not audio_wav and sample.video_path and sample.video_path != sample.video_input:
+                audio_wav = extract_audio_wav_bytes_from_video_input(
+                    video_input=sample.video_path,
+                    sample_id=str(sample.sample_id),
+                    cache_dir=audio_cache_dir,
+                    max_duration_seconds=settings.max_audio_duration_seconds,
+                )
             if not audio_wav:
                 raise TranscriptionFailure(
                     f"Failed to extract audio for transcription (sample_id={sample.sample_id})."
@@ -296,10 +306,14 @@ def _prepare_pass_samples(
     qa_jsonl_path: str,
     metadata_paths: tuple[str, ...],
     max_samples: int | None,
+    output_dir: str | None = None,
 ) -> list[MCQSample]:
     samples = load_samples(qa_jsonl_path)
     for metadata_path in metadata_paths:
         enrich_samples_from_metadata(samples, metadata_path)
+    if output_dir:
+        mis_excluded = load_mis_exclusion_ids(output_dir)
+        samples = filter_excluded_samples(samples, mis_excluded)
     _print_task_distribution(f"[{pass_label}] Loaded dataset", samples)
     if max_samples is not None:
         samples = representative_even_sample(samples, max_samples)
@@ -386,30 +400,24 @@ def run_idea2_pipeline(
                 settings.video_metadata_gemini_json,
             ),
             max_samples=max_samples,
+            output_dir=str(base_out),
         )
-        qa_ids = [s.sample_id for s in samples]
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
             vmap = {}
         else:
-            cap = prefetch_videos if prefetch_videos is not None else len(set(qa_ids))
+            n_vids = len({s.video_id or s.sample_id for s in samples})
             print(
-                f"[Prefetch] Resolving up to {cap} distinct HF video(s) for {len(samples)} sample row(s) "
+                f"[Prefetch] Resolving up to {n_vids} distinct video_id(s) for {len(samples)} sample row(s) "
                 f"(streaming, one bar).\n"
             )
             use_gemini = "gemini" in Path(input_jsonl).name.lower()
             oh, og = prefetch_hf_avut_train_videos(
-                None if use_gemini else qa_ids,
-                qa_ids if use_gemini else None,
+                None if use_gemini else samples,
+                samples if use_gemini else None,
                 settings.hf_video_dataset_uri,
                 max_videos=prefetch_videos,
                 desc="Prefetch videos (HF)",
-                human_expected_video_by_id=(
-                    {str(s.sample_id): s.video_path or "" for s in samples} if not use_gemini else None
-                ),
-                gemini_expected_video_by_id=(
-                    {str(s.sample_id): s.video_path or "" for s in samples} if use_gemini else None
-                ),
             )
             vmap = og if use_gemini else oh
         attach_prefetched_videos(samples, vmap)
@@ -445,37 +453,36 @@ def run_idea2_pipeline(
             qa_jsonl_path=settings.qa_human_filtered_jsonl,
             metadata_paths=(settings.video_metadata_human_json,),
             max_samples=max_h,
+            output_dir=str(base_out),
         )
         samples_gemini = _prepare_pass_samples(
             pass_label="AV-Gemini",
             qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
             metadata_paths=(settings.video_metadata_gemini_json,),
             max_samples=max_g,
+            output_dir=str(base_out),
         )
-        qh = [str(s.sample_id) for s in samples_human]
-        qg = [str(s.sample_id) for s in samples_gemini]
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
             vmap_h, vmap_g = {}, {}
         else:
-            nh, ng = len(set(qh)), len(set(qg))
+            nh = len({s.video_id or s.sample_id for s in samples_human})
+            ng = len({s.video_id or s.sample_id for s in samples_gemini})
             cap_note = (
-                f" (each side capped to {prefetch_videos} id(s))"
+                f" (each side capped to {prefetch_videos} video_id(s))"
                 if prefetch_videos is not None
                 else ""
             )
             print(
-                f"[Prefetch] AV-Human {nh} distinct id(s), AV-Gemini {ng} distinct id(s); "
+                f"[Prefetch] AV-Human {nh} distinct video_id(s), AV-Gemini {ng} distinct video_id(s); "
                 f"one HF stream / one bar{cap_note}.\n"
             )
             vmap_h, vmap_g = prefetch_hf_avut_train_videos(
-                qh,
-                qg,
+                samples_human,
+                samples_gemini,
                 settings.hf_video_dataset_uri,
                 max_videos=prefetch_videos,
                 desc="Prefetch videos (HF)",
-                human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
-                gemini_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_gemini},
             )
         attach_prefetched_videos(samples_human, vmap_h)
         attach_prefetched_videos(samples_gemini, vmap_g)
@@ -516,23 +523,21 @@ def run_idea2_pipeline(
         qa_jsonl_path=settings.qa_human_filtered_jsonl,
         metadata_paths=(settings.video_metadata_human_json,),
         max_samples=max_samples,
+        output_dir=str(base_out),
     )
-    qh = [str(s.sample_id) for s in samples_human]
     if no_prefetch_videos:
         print("[Prefetch] Skipped (--no-prefetch-videos).\n")
         vmap_h = {}
     else:
-        nh = len(set(qh))
-        cap_note = f" (capped to {prefetch_videos} id(s))" if prefetch_videos is not None else ""
-        print(f"[Prefetch] AV-Human {nh} distinct id(s); one HF stream / one bar{cap_note}.\n")
+        n_vids = len({s.video_id or s.sample_id for s in samples_human})
+        cap_note = f" (capped to {prefetch_videos} video_id(s))" if prefetch_videos is not None else ""
+        print(f"[Prefetch] AV-Human {n_vids} distinct video_id(s); one HF stream / one bar{cap_note}.\n")
         vmap_h, _ = prefetch_hf_avut_train_videos(
-            qh,
+            samples_human,
             None,
             settings.hf_video_dataset_uri,
             max_videos=prefetch_videos,
             desc="Prefetch videos (HF)",
-            human_expected_video_by_id={str(s.sample_id): s.video_path or "" for s in samples_human},
-            gemini_expected_video_by_id=None,
         )
     attach_prefetched_videos(samples_human, vmap_h)
 
@@ -576,7 +581,15 @@ def _run_pass_inference(
     _log(f"[{pass_label}] Model={settings.gemini_model}")
 
     client = GeminiClient(settings)
-    describer = ModalityDescriber(client)
+    mis_budget = load_token_budget(settings.output_dir, fallback_per_modality=settings.max_output_tokens_describe)
+    per_mod_budget = PerModalityBudget(
+        text=mis_budget.text, audio=mis_budget.audio, visual=mis_budget.visual
+    )
+    _log(
+        f"[{pass_label}] Token budgets: text={per_mod_budget.text}, "
+        f"audio={per_mod_budget.audio}, visual={per_mod_budget.visual}"
+    )
+    describer = ModalityDescriber(client, settings, per_modality_budget=per_mod_budget)
     reasoner = PragReasoner(client)
 
     preds: list[str] = []
@@ -612,7 +625,7 @@ def _run_pass_inference(
         context_block = ""
         reasoning_cot = ""
         try:
-            prepared = _prepare_modalities_for_sample(sample, client, audio_cache_dir)
+            prepared = _prepare_modalities_for_sample(sample, client, audio_cache_dir, settings)
             used_text = prepared["text"]
             used_audio = prepared["audio"]
             used_video = prepared["video"]
@@ -642,10 +655,9 @@ def _run_pass_inference(
                 }
             )
 
-            t_prompt = text_perception_prompt(sample)
             a_prompt = audio_perception_prompt(sample)
             v_prompt = video_perception_prompt(sample)
-            text_desc = describer.describe_text(sample, t_prompt) if used_text else "Text unavailable."
+            text_desc = describer.describe_text(sample) if used_text else "Text unavailable."
             audio_desc = (
                 describer.describe_audio(sample, a_prompt, text_desc)
                 if used_audio
@@ -664,14 +676,18 @@ def _run_pass_inference(
                 f"[VISUAL]\n{video_desc}\n"
             )
 
-            final_prompt = build_fixed_mcq_prompt(sample, context_block=context_block)
+            final_prompt = build_fixed_mcq_prompt(
+                sample, context_block=context_block, is_idea2=True
+            )
             pred, reasoning_cot = client.generate_answer_letter(
                 final_prompt,
                 media_input=None,
                 stage="reason_and_answer",
                 extraction_mode="answer_is",
-                max_output_tokens=FINAL_MCQ_ANSWER_MAX_OUTPUT_TOKENS,
-                format_retry_attempts=3,
+                max_output_tokens=settings.max_output_tokens_idea2_answer,
+                format_retry_attempts=settings.format_retry_attempts,
+                max_repair_attempts=settings.max_repair_attempts,
+                thinking_budget=settings.thinking_budget_idea2,
             )
             raw_pred = reasoning_cot
 
@@ -813,7 +829,13 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     Returns:
         None.
     """
+    divider = {
+        "_run_divider": "============================================================",
+        "run_started_unix_ms": int(time.time() * 1000),
+        "file": path.name,
+    }
     with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(divider, ensure_ascii=False) + "\n")
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
