@@ -1,0 +1,46 @@
+{
+  "pass": "AV-Human",
+  "table3_note": "AV-Human only (default)",
+  "qa_jsonl": "data/avut/avut_human_filtered.jsonl",
+  "metadata_json": [
+    "data/avut/hf_raw/AV_Human_filtered_data.json"
+  ],
+  "accuracy": 0.6666666666666666,
+  "task_accuracy": {
+    "AIE": 0.8,
+    "ACC": 0.0,
+    "AEL": 1.0,
+    "AVCM": 1.0,
+    "AVOM": 0.6,
+    "AVTM": 0.6
+  },
+  "task_counts_scored": {
+    "AIE": 5,
+    "ACC": 5,
+    "AEL": 5,
+    "AVCM": 5,
+    "AVOM": 5,
+    "AVTM": 5
+  },
+  "n_samples_total": 30,
+  "n_samples_scored": 30,
+  "n_samples_failed": 0,
+  "video_ready_count": 30,
+  "video_missing_count": 0,
+  "video_media_kinds": {
+    "usable_video_input": 30
+  },
+  "gemini_model_configured": "gemini-2.5-flash",
+  "gemini_model_effective": "gemini-2.5-flash",
+  "pipeline_latency_ms": 214669,
+  "pipeline_latency_s": 214.669,
+  "run_logs": [
+    "[AV-Human] Start | note=AV-Human only (default) | samples=30",
+    "[AV-Human] QA=data/avut/avut_human_filtered.jsonl",
+    "[AV-Human] Metadata=data/avut/hf_raw/AV_Human_filtered_data.json",
+    "[AV-Human] HF_URI=hf://tsinghua-ee/AVUTBenchmark@train",
+    "[AV-Human] Model=gemini-2.5-flash",
+    "[AV-Human] Video availability: ready=30/30, missing=0/30",
+    "[AV-Human] Done | scored=30/30 | acc=0.6667 | latency_ms=214669 | outputs=vanilla_predictions_av_human.jsonl,vanilla_metrics_av_human.json"
+  ]
+}

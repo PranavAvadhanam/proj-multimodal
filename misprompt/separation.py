@@ -15,13 +15,20 @@ MIS_EXCLUSION_FILE = "mis_excluded_sample_ids.json"
 def load_mis_exclusion_ids(output_dir: str | Path) -> set[str]:
     """Load sample IDs used by MIS calibration that must be excluded from evaluation.
 
-    Checks both the default MIS output subdirectory and the parent output directory.
+    Checks all known MIS output subdirectories (mis/, mis_cot/) and the parent
+    output directory. Returns the union of all exclusion IDs found, ensuring
+    samples from *any* MIS calibration run (CoT or non-CoT) are excluded.
     Returns empty set if no exclusion file exists (MIS hasn't been run yet).
     """
     ids: set[str] = set()
     base = Path(output_dir)
 
-    for candidate in [base / "mis" / MIS_EXCLUSION_FILE, base / MIS_EXCLUSION_FILE]:
+    candidates = [
+        base / "mis" / MIS_EXCLUSION_FILE,
+        base / "mis_cot" / MIS_EXCLUSION_FILE,
+        base / MIS_EXCLUSION_FILE,
+    ]
+    for candidate in candidates:
         if candidate.exists():
             try:
                 data = json.loads(candidate.read_text(encoding="utf-8"))

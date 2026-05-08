@@ -41,7 +41,6 @@ from src.mspragcot.modality_describer import ModalityDescriber
 
 from misprompt.compute_mis import (
     MODALITIES,
-    mis_to_token_allocation,
     run_mis_evaluation,
     softmax,
 )
@@ -131,15 +130,9 @@ def _prepare_descriptions(
         text_ready = bool(sample.transcript)
         audio_ready = sample.audio_input is not None
 
+        cached_wav_bytes: bytes | None = None
         if not text_ready and has_video:
             try:
-                import base64
-                import urllib.error
-                import urllib.request
-
-                import google.auth
-                import google.auth.transport.requests
-
                 audio_wav = extract_audio_wav_bytes_from_video_input(
                     video_input=sample.video_input,
                     sample_id=sid,
@@ -147,6 +140,7 @@ def _prepare_descriptions(
                     max_duration_seconds=settings.max_audio_duration_seconds,
                 )
                 if audio_wav:
+                    cached_wav_bytes = audio_wav
                     project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT")
                     if project_id:
                         from src.main import _transcribe_with_stt_v2
@@ -159,14 +153,19 @@ def _prepare_descriptions(
                 print(f"  [MIS] Transcription failed for {sid}: {exc}")
 
         if not audio_ready and has_video:
-            audio_part = extract_audio_part_from_video_input(
-                video_input=sample.video_input,
-                sample_id=sid,
-                cache_dir=audio_cache_dir,
-            )
-            if audio_part is not None:
-                sample.audio_input = audio_part
+            if cached_wav_bytes:
+                from google.genai import types
+                sample.audio_input = types.Part.from_bytes(data=cached_wav_bytes, mime_type="audio/wav")
                 audio_ready = True
+            else:
+                audio_part = extract_audio_part_from_video_input(
+                    video_input=sample.video_input,
+                    sample_id=sid,
+                    cache_dir=audio_cache_dir,
+                )
+                if audio_part is not None:
+                    sample.audio_input = audio_part
+                    audio_ready = True
 
         if text_ready:
             descs["text"] = describer.describe_text(sample)
@@ -197,9 +196,13 @@ def _prepare_descriptions(
 
 
 def _get_idea2_used_ids(output_dir: Path) -> set[str]:
-    """Collect sample IDs already used in idea2 predictions to enforce separation."""
+    """Collect sample IDs already used in idea2 predictions to enforce separation.
+
+    Scans the output root and all immediate subdirectories (e.g. idea2/, idea2_cot/,
+    idea2_mis/, idea2_mis_cot/) for prediction JSONL files.
+    """
     ids: set[str] = set()
-    for pred_file in output_dir.glob("idea2_predictions_*.jsonl"):
+    for pred_file in output_dir.rglob("idea2_predictions_*.jsonl"):
         with pred_file.open("r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
@@ -235,8 +238,13 @@ def main():
         help="Random seed for sample selection (default: 42).",
     )
     parser.add_argument(
-        "--total-token-budget", type=int, default=768,
-        help="Total token budget to split across modalities (default: 768).",
+        "--total-token-budget",
+        type=int,
+        default=None,
+        help=(
+            "Total describe-token budget across text+audio+visual (default: 3 × "
+            "GEMINI_MAX_OUTPUT_TOKENS_DESCRIBE after get_settings())."
+        ),
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
@@ -245,7 +253,13 @@ def main():
     args = parser.parse_args()
 
     settings = get_settings()
-    base_out = Path(args.output_dir or os.path.join(settings.output_dir, "mis"))
+    total_token_budget = (
+        args.total_token_budget
+        if args.total_token_budget is not None
+        else 3 * settings.max_output_tokens_describe
+    )
+    mis_subdir = os.environ.get("MIS_SUBDIR", "mis")
+    base_out = Path(args.output_dir or os.path.join(settings.output_dir, mis_subdir))
     base_out.mkdir(parents=True, exist_ok=True)
     audio_cache_dir = base_out / "audio_cache"
     audio_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +268,7 @@ def main():
     print("MODALITY IMPORTANCE SCORE (MIS) CALIBRATION")
     print("=" * 70)
     print(f"  MIS samples:       {args.mis_samples}")
-    print(f"  Total token budget: {args.total_token_budget}")
+    print(f"  Total token budget: {total_token_budget}")
     print(f"  Seed:              {args.seed}")
     print(f"  Output:            {base_out}")
     print(f"  Model:             {settings.gemini_model}")
@@ -307,6 +321,7 @@ def main():
         descriptions,
         settings,
         base_out,
+        total_token_budget=total_token_budget,
     )
 
     elapsed = time.perf_counter() - t0
@@ -322,8 +337,8 @@ def main():
     for m in MODALITIES:
         print(f"    {m:>7}: {output['softmax_weights'][m]:.4f}")
 
-    print(f"\n  Token allocation (budget={args.total_token_budget}):")
-    token_alloc = mis_to_token_allocation(output["raw_mis_scores"], args.total_token_budget)
+    print(f"\n  Token allocation (budget={total_token_budget}):")
+    token_alloc = output["token_allocation"]
     for m in MODALITIES:
         print(f"    {m:>7}: {token_alloc[m]} tokens")
 
@@ -338,7 +353,7 @@ def main():
 
     alloc_path = base_out / "token_allocation.json"
     alloc_path.write_text(json.dumps({
-        "total_budget": args.total_token_budget,
+        "total_budget": total_token_budget,
         "allocation": token_alloc,
         "softmax_weights": output["softmax_weights"],
         "raw_mis_scores": output["raw_mis_scores"],

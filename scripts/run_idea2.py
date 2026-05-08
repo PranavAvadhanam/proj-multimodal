@@ -13,6 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 load_dotenv()
 
+# No-CoT variant: disable thinking tokens for both global and idea2-specific budgets.
+os.environ["GEMINI_THINKING_BUDGET"] = "0"
+os.environ["GEMINI_THINKING_BUDGET_IDEA2"] = "0"
+# Load MIS allocations from the no-CoT calibration directory.
+os.environ.setdefault("MIS_SUBDIR", "mis")
+
 # Optional faster Hub downloads (install `hf-transfer`); safe if package missing.
 try:
     import hf_transfer  # noqa: F401
@@ -78,6 +84,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip Hugging Face video prefetch (much faster; pipeline runs without video_input).",
     )
+    parser.add_argument(
+        "--mis",
+        action="store_true",
+        default=False,
+        help="Use MIS-calibrated modality token weights (requires prior run of run_misprompt.py).",
+    )
     return parser.parse_args()
 
 
@@ -87,6 +99,9 @@ def main() -> None:
         raise ValueError("--run-sample cannot be used with --input.")
     if args.split_max_samples and args.max_samples is None:
         raise ValueError("--split-max-samples requires --max-samples.")
+    if args.output_dir is None:
+        subdir = "idea2_mis" if args.mis else "idea2"
+        args.output_dir = os.path.join("outputs", subdir)
     try:
         metrics = run_idea2_pipeline(
             args.input,
@@ -96,6 +111,7 @@ def main() -> None:
             prefetch_videos=args.prefetch_videos,
             no_prefetch_videos=args.no_prefetch_videos,
             split_max_samples=args.split_max_samples,
+            use_mis=args.mis,
         )
     except TranscriptionFailure as exc:
         print(f"FATAL: {exc}", file=sys.stderr)

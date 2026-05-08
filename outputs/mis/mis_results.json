@@ -1,0 +1,52 @@
+{
+  "n_samples": 20,
+  "n_subsets": 7,
+  "total_evaluations": 140,
+  "mis_sample_ids": [
+    "146",
+    "1069",
+    "136",
+    "1039",
+    "430",
+    "296",
+    "139",
+    "143",
+    "1087",
+    "290",
+    "140",
+    "435",
+    "341",
+    "288",
+    "347",
+    "142",
+    "1099",
+    "427",
+    "337",
+    "349"
+  ],
+  "raw_mis_scores": {
+    "text": 0.13333333333333336,
+    "audio": 0.016666666666666663,
+    "visual": 0.08333333333333334
+  },
+  "softmax_weights": {
+    "text": 0.35197496021551405,
+    "audio": 0.31321610094002084,
+    "visual": 0.3348089388444651
+  },
+  "token_allocation_budget": 3072,
+  "token_allocation": {
+    "text": 1081,
+    "audio": 962,
+    "visual": 1029
+  },
+  "per_subset_accuracy": {
+    "text": 0.4,
+    "audio": 0.25,
+    "visual": 0.35,
+    "audio+text": 0.45,
+    "text+visual": 0.5,
+    "audio+visual": 0.4,
+    "audio+text+visual": 0.45
+  }
+}

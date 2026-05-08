@@ -150,7 +150,13 @@ def extract_audio_wav_bytes_from_video_input(
             ]
         )
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            try:
+                out_wav.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
         except Exception:
             return None
 

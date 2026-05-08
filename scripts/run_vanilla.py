@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 load_dotenv()
 
+# No-CoT variant: disable thinking tokens.
+os.environ["GEMINI_THINKING_BUDGET"] = "0"
+
 # Optional faster Hub downloads (install `hf-transfer`); safe if package missing.
 try:
     import hf_transfer  # noqa: F401
@@ -87,6 +90,8 @@ def main() -> None:
         raise ValueError("--run-sample cannot be used with --input.")
     if args.split_max_samples and args.max_samples is None:
         raise ValueError("--split-max-samples requires --max-samples.")
+    if args.output_dir is None:
+        args.output_dir = os.path.join("outputs", "vanilla")
     metrics = run_vanilla_pipeline(
         args.input,
         output_dir=args.output_dir,

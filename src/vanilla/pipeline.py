@@ -19,6 +19,7 @@ from src.avut.dataset import (
 )
 from src.avut.dataset_basic import load_basic_human_sample
 from src.config import Settings, get_settings
+from misprompt.separation import filter_excluded_samples, load_mis_exclusion_ids
 from src.avut.prompts import (
     final_mcq_answer_format_prompt,
     vanilla_mcq_answer_preamble_prompt,
@@ -109,10 +110,14 @@ def _prepare_pass_samples(
     qa_jsonl_path: str,
     metadata_paths: tuple[str, ...],
     max_samples: int | None,
+    output_dir: str | None = None,
 ) -> list[MCQSample]:
     samples = load_samples(qa_jsonl_path)
     for metadata_path in metadata_paths:
         enrich_samples_from_metadata(samples, metadata_path)
+    if output_dir:
+        mis_excluded = load_mis_exclusion_ids(output_dir)
+        samples = filter_excluded_samples(samples, mis_excluded)
     _print_task_distribution(f"[{pass_label}] Loaded dataset", samples)
     if max_samples is not None:
         samples = representative_even_sample(samples, max_samples)
@@ -196,6 +201,7 @@ def run_vanilla_pipeline(
                 settings.video_metadata_gemini_json,
             ),
             max_samples=max_samples,
+            output_dir=settings.output_dir,
         )
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
@@ -247,12 +253,14 @@ def run_vanilla_pipeline(
             qa_jsonl_path=settings.qa_human_filtered_jsonl,
             metadata_paths=(settings.video_metadata_human_json,),
             max_samples=max_h,
+            output_dir=settings.output_dir,
         )
         samples_gemini = _prepare_pass_samples(
             pass_label="AV-Gemini",
             qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
             metadata_paths=(settings.video_metadata_gemini_json,),
             max_samples=max_g,
+            output_dir=settings.output_dir,
         )
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
@@ -315,6 +323,7 @@ def run_vanilla_pipeline(
         qa_jsonl_path=settings.qa_human_filtered_jsonl,
         metadata_paths=(settings.video_metadata_human_json,),
         max_samples=max_samples,
+        output_dir=settings.output_dir,
     )
     if no_prefetch_videos:
         print("[Prefetch] Skipped (--no-prefetch-videos).\n")

@@ -8,3 +8,4 @@ hf-transfer
 torchcodec
 torch 
 google-generativeai
+matplotlib

@@ -34,7 +34,7 @@ class Settings:
     output_dir: str
     # Token budgets — every Gemini call resolves its cap from one of these.
     max_output_tokens: int               # global fallback
-    max_output_tokens_describe: int      # per-modality description (text/audio/video)
+    max_output_tokens_describe: int      # baseline per modality when MIS is off; MIS sums to 3× this across text+audio+video
     max_output_tokens_idea2_answer: int  # idea2 final MCQ answer step
     max_output_tokens_vanilla_answer: int  # vanilla single-call MCQ answer
     thinking_budget: int                 # Gemini thinking tokens; 0 = disabled, -1 = dynamic
@@ -68,13 +68,14 @@ def get_settings() -> Settings:
         temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.1")),
         timeout_ms=int(os.getenv("GEMINI_TIMEOUT_MS", "90000")),
         max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "256")),
-        max_output_tokens_describe=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_DESCRIBE", "512")),
+        # Per-mod describe cap (no MIS). With MIS calibration, allocations sum to 3× this env value.
+        max_output_tokens_describe=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_DESCRIBE", "1024")),
         # sometimes takes time before it converges on "Answer is X", 
         # doesn't always say the "answer is X" right away, even if wasn't instructed to do CoT
         max_output_tokens_idea2_answer=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_IDEA2_ANSWER", "256")), 
         max_output_tokens_vanilla_answer=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_VANILLA_ANSWER", "256")),
         thinking_budget=int(os.getenv("GEMINI_THINKING_BUDGET", "0")),
-        thinking_budget_idea2=int(os.getenv("GEMINI_THINKING_BUDGET_IDEA2", "768")),
+        thinking_budget_idea2=int(os.getenv("GEMINI_THINKING_BUDGET_IDEA2", "0")),
         format_retry_attempts=int(os.getenv("FORMAT_RETRY_ATTEMPTS", "3")),
         max_repair_attempts=int(os.getenv("MAX_REPAIR_ATTEMPTS", "3")),
         max_audio_duration_seconds=int(os.getenv("MAX_AUDIO_DURATION_SECONDS", "60")),

@@ -60,9 +60,29 @@ class ModalityDescriber:
         return self._budget.visual if self._budget else self._default_budget
 
     def describe_text(self, sample: MCQSample) -> str:
+        """Return the raw transcript (no Gemini call). Used when MIS is off."""
         if not sample.transcript:
             raise ValueError("describe_text requires transcript text input.")
         return f"{sample.transcript}\n"
+
+    def describe_text_summary(self, sample: MCQSample) -> str:
+        """Summarize the transcript via Gemini, capped to the MIS text budget."""
+        if not sample.transcript:
+            raise ValueError("describe_text_summary requires transcript text input.")
+        budget = self.text_budget
+        prompt = (
+            "Summarize the following spoken transcript from a short video. "
+            "Preserve all factual details, named entities, numbers, timestamps, "
+            "and quoted speech that could help answer a multiple-choice question.\n\n"
+            f"Transcript:\n\"{sample.transcript}\"\n\n"
+            f"Question for context: {sample.question}"
+            + _FULLNESS_PROMPT.format(budget=budget)
+        )
+        return self.client.generate(
+            prompt,
+            stage="describe_text_summary",
+            max_output_tokens=budget,
+        )
 
     def describe_audio(self, sample: MCQSample, prompt: str, text_reference: str) -> str:
         if sample.audio_input is None:

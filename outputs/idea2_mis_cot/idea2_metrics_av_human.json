@@ -1,0 +1,51 @@
+{
+  "pass": "AV-Human",
+  "table3_note": "AV-Human only (default)",
+  "qa_jsonl": "data/avut/avut_human_filtered.jsonl",
+  "metadata_json": [
+    "data/avut/hf_raw/AV_Human_filtered_data.json"
+  ],
+  "accuracy": 0.6666666666666666,
+  "task_accuracy": {
+    "AIE": 1.0,
+    "ACC": 0.6,
+    "AEL": 0.8,
+    "AVCM": 1.0,
+    "AVOM": 0.2,
+    "AVTM": 0.4
+  },
+  "task_counts_scored": {
+    "AIE": 5,
+    "ACC": 5,
+    "AEL": 5,
+    "AVCM": 5,
+    "AVOM": 5,
+    "AVTM": 5
+  },
+  "n_samples_total": 30,
+  "n_samples_scored": 30,
+  "n_samples_failed": 0,
+  "modality_usage_counts": {
+    "text": 30,
+    "audio": 30,
+    "video": 30
+  },
+  "modality_usage_combos": {
+    "text+audio+video": 30
+  },
+  "gemini_model_configured": "gemini-2.5-flash",
+  "gemini_model_effective": "gemini-2.5-flash",
+  "pipeline_latency_ms": 803902,
+  "pipeline_latency_s": 803.902,
+  "run_logs": [
+    "[AV-Human] Start | note=AV-Human only (default) | samples=30",
+    "[AV-Human] QA=data/avut/avut_human_filtered.jsonl",
+    "[AV-Human] Metadata=data/avut/hf_raw/AV_Human_filtered_data.json",
+    "[AV-Human] HF_URI=hf://tsinghua-ee/AVUTBenchmark@train",
+    "[AV-Human] Model=gemini-2.5-flash",
+    "[AV-Human] MIS token budgets: text=1034, audio=951, visual=1087",
+    "[AV-Human] Modality usage: text=30/30 (100.0%), audio=30/30 (100.0%), video=30/30 (100.0%)",
+    "[AV-Human] Modality combos: text+audio+video=30",
+    "[AV-Human] Done | scored=30/30 | acc=0.6667 | latency_ms=803902 | outputs=idea2_predictions_av_human.jsonl,idea2_metrics_av_human.json"
+  ]
+}

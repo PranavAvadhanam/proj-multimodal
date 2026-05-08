@@ -7,11 +7,12 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 import google.auth
 import google.auth.transport.requests
+from google.genai import types
 from tqdm import tqdm
 
 from src.avut.audio_extractor import (
@@ -39,12 +40,14 @@ from src.config import Settings, get_settings
 from src.eval.metrics import accuracy
 from src.mspragcot.client import GeminiClient
 from src.mspragcot.modality_describer import ModalityDescriber, PerModalityBudget
-from misprompt.token_budget import load_token_budget
 from src.mspragcot.reasoner import PragReasoner
+from misprompt.token_budget import load_token_budget
+
+ORDERED_TASK_CODES = ("AIE", "ACC", "AEL", "AVCM", "AVOM", "AVTM")
 
 
 class TranscriptionFailure(RuntimeError):
-    """Fatal transcription error that should abort the current run."""
+    """Transcription / audio-extract failure — may queue a spare eval sample (never MIS calibration rows)."""
 
 
 def _transcribe_with_stt_v2(audio_wav_bytes: bytes, project_id: str) -> str:
@@ -239,6 +242,7 @@ def _prepare_modalities_for_sample(
     elif not video_ready:
         prep_notes.append("video_unusable")
 
+    cached_wav_bytes: bytes | None = None
     if not text_ready and video_ready:
         try:
             audio_wav = extract_audio_wav_bytes_from_video_input(
@@ -258,6 +262,7 @@ def _prepare_modalities_for_sample(
                 raise TranscriptionFailure(
                     f"Failed to extract audio for transcription (sample_id={sample.sample_id})."
                 )
+            cached_wav_bytes = audio_wav
             project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT")
             transcript = _transcribe_with_stt_v2(
                 audio_wav_bytes=audio_wav,
@@ -281,16 +286,20 @@ def _prepare_modalities_for_sample(
             ) from exc
 
     if not audio_ready and video_ready:
-        audio_part = extract_audio_part_from_video_input(
-            video_input=sample.video_input,
-            sample_id=str(sample.sample_id),
-            cache_dir=audio_cache_dir,
-        )
-        if audio_part is not None:
-            sample.audio_input = audio_part
+        if cached_wav_bytes:
+            sample.audio_input = types.Part.from_bytes(data=cached_wav_bytes, mime_type="audio/wav")
             audio_ready = True
         else:
-            prep_notes.append("audio_extract_failed")
+            audio_part = extract_audio_part_from_video_input(
+                video_input=sample.video_input,
+                sample_id=str(sample.sample_id),
+                cache_dir=audio_cache_dir,
+            )
+            if audio_part is not None:
+                sample.audio_input = audio_part
+                audio_ready = True
+            else:
+                prep_notes.append("audio_extract_failed")
 
     return {
         "text": text_ready,
@@ -321,6 +330,77 @@ def _prepare_pass_samples(
     return samples
 
 
+def _sid_sort_key(sample: MCQSample) -> tuple:
+    sid = str(sample.sample_id)
+    if sid.isdigit():
+        return (0, int(sid))
+    return (1, sid)
+
+
+def _eval_eligible_av_human(settings: Settings) -> list[MCQSample]:
+    """AV-Human rows eligible for Idea2/vanilla evaluation (excludes MIS calibration ids)."""
+    xs = load_samples(settings.qa_human_filtered_jsonl)
+    enrich_samples_from_metadata(xs, settings.video_metadata_human_json)
+    xs = filter_excluded_samples(xs, load_mis_exclusion_ids(settings.output_dir))
+    return xs
+
+
+def _partition_transcription_spares(
+    eligible_all: list[MCQSample],
+    primary_samples: list[MCQSample],
+) -> tuple[dict[str, deque[MCQSample]], deque[MCQSample]]:
+    """Extra QA ids for transcription failures — only from evaluation pool, never MIS calibration rows."""
+    primary_ids = {str(s.sample_id) for s in primary_samples}
+    spare_by_task: dict[str, deque[MCQSample]] = {c: deque() for c in ORDERED_TASK_CODES}
+    spare_other: deque[MCQSample] = deque()
+    for s in sorted(eligible_all, key=_sid_sort_key):
+        if str(s.sample_id) in primary_ids:
+            continue
+        tc = s.task_code
+        if tc in spare_by_task:
+            spare_by_task[tc].append(s)
+        else:
+            spare_other.append(s)
+    return spare_by_task, spare_other
+
+
+def _pop_transcription_spare(
+    task_code: str | None,
+    spare_by_task: dict[str, deque[MCQSample]],
+    spare_other: deque[MCQSample],
+) -> MCQSample | None:
+    pref = task_code if task_code in spare_by_task else None
+    if pref and spare_by_task[pref]:
+        return spare_by_task[pref].popleft()
+    for code in ORDERED_TASK_CODES:
+        if code != pref and spare_by_task[code]:
+            return spare_by_task[code].popleft()
+    if spare_other:
+        return spare_other.popleft()
+    return None
+
+
+def _ensure_human_video_attached(
+    sample: MCQSample,
+    *,
+    client: GeminiClient,
+    settings: Settings,
+    human_video_map: dict[str, object],
+    prefetch_videos: int | None,
+) -> None:
+    if client.has_usable_media(sample.video_input):
+        return
+    new_h, _ = prefetch_hf_avut_train_videos(
+        [sample],
+        None,
+        settings.hf_video_dataset_uri,
+        max_videos=prefetch_videos,
+        desc="Prefetch transcription spare (HF)",
+    )
+    human_video_map.update(new_h)
+    attach_prefetched_videos([sample], human_video_map)
+
+
 def run_idea2_pipeline(
     input_jsonl: str | None = None,
     output_dir: str | None = None,
@@ -329,6 +409,7 @@ def run_idea2_pipeline(
     prefetch_videos: int | None = None,
     no_prefetch_videos: bool = False,
     split_max_samples: bool = False,
+    use_mis: bool = False,
 ) -> dict:
     """Run Idea 2 pipeline.
 
@@ -380,6 +461,7 @@ def run_idea2_pipeline(
                 "sample_video_uri": basic_sample_uri,
                 "sample_video_url_used": basic_effective_video_url,
             },
+            use_mis=use_mis,
         )
         return {"AV_Human_basic": metrics}
 
@@ -400,7 +482,7 @@ def run_idea2_pipeline(
                 settings.video_metadata_gemini_json,
             ),
             max_samples=max_samples,
-            output_dir=str(base_out),
+            output_dir=settings.output_dir,
         )
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
@@ -433,6 +515,7 @@ def run_idea2_pipeline(
             ),
             out_dir=base_out,
             file_slug="single",
+            use_mis=use_mis,
         )
         return {"single": metrics}
 
@@ -448,25 +531,33 @@ def run_idea2_pipeline(
             "(default: all needed on each side). Use --no-prefetch-videos to skip Hub entirely.\n"
         )
 
-        samples_human = _prepare_pass_samples(
-            pass_label="AV-Human",
-            qa_jsonl_path=settings.qa_human_filtered_jsonl,
-            metadata_paths=(settings.video_metadata_human_json,),
-            max_samples=max_h,
-            output_dir=str(base_out),
+        eligible_human = _eval_eligible_av_human(settings)
+        _print_task_distribution(
+            "[AV-Human] Loaded dataset (eval-eligible; MIS calibration rows excluded)",
+            eligible_human,
         )
+        samples_human = representative_even_sample(eligible_human, max_h)
+        _print_task_distribution("[AV-Human] Selected subset (primary QA rows)", samples_human)
+        spare_by_task_h, spare_other_h = _partition_transcription_spares(eligible_human, samples_human)
+
         samples_gemini = _prepare_pass_samples(
             pass_label="AV-Gemini",
             qa_jsonl_path=settings.qa_gemini_filtered_jsonl,
             metadata_paths=(settings.video_metadata_gemini_json,),
             max_samples=max_g,
-            output_dir=str(base_out),
+            output_dir=settings.output_dir,
         )
         if no_prefetch_videos:
             print("[Prefetch] Skipped (--no-prefetch-videos).\n")
             vmap_h, vmap_g = {}, {}
+            human_attach = samples_human
         else:
+            human_pf = [*samples_human]
+            for dq in spare_by_task_h.values():
+                human_pf.extend(dq)
+            human_pf.extend(spare_other_h)
             nh = len({s.video_id or s.sample_id for s in samples_human})
+            nh_pf = len({s.video_id or s.sample_id for s in human_pf})
             ng = len({s.video_id or s.sample_id for s in samples_gemini})
             cap_note = (
                 f" (each side capped to {prefetch_videos} video_id(s))"
@@ -474,17 +565,20 @@ def run_idea2_pipeline(
                 else ""
             )
             print(
-                f"[Prefetch] AV-Human {nh} distinct video_id(s), AV-Gemini {ng} distinct video_id(s); "
+                f"[Prefetch] AV-Human primary {nh} distinct video_id(s) "
+                f"(+ transcription spares ⇒ {nh_pf} ids in prefetch bundle), "
+                f"AV-Gemini {ng} distinct video_id(s); "
                 f"one HF stream / one bar{cap_note}.\n"
             )
             vmap_h, vmap_g = prefetch_hf_avut_train_videos(
-                samples_human,
+                human_pf,
                 samples_gemini,
                 settings.hf_video_dataset_uri,
                 max_videos=prefetch_videos,
                 desc="Prefetch videos (HF)",
             )
-        attach_prefetched_videos(samples_human, vmap_h)
+            human_attach = human_pf
+        attach_prefetched_videos(human_attach, vmap_h)
         attach_prefetched_videos(samples_gemini, vmap_g)
 
         m_human = _run_pass_inference(
@@ -496,6 +590,11 @@ def run_idea2_pipeline(
             metadata_paths=(settings.video_metadata_human_json,),
             out_dir=base_out,
             file_slug="av_human",
+            use_mis=use_mis,
+            transcription_spares=spare_by_task_h,
+            spare_fallback_other=spare_other_h,
+            human_video_map=vmap_h,
+            prefetch_videos=prefetch_videos,
         )
         m_gemini = _run_pass_inference(
             settings=settings,
@@ -506,6 +605,7 @@ def run_idea2_pipeline(
             metadata_paths=(settings.video_metadata_gemini_json,),
             out_dir=base_out,
             file_slug="av_gemini",
+            use_mis=use_mis,
         )
         return {"AV_Human": m_human, "AV_Gemini": m_gemini}
 
@@ -518,28 +618,45 @@ def run_idea2_pipeline(
         "(default: all needed). Use --no-prefetch-videos to skip Hub entirely.\n"
     )
 
-    samples_human = _prepare_pass_samples(
-        pass_label="AV-Human",
-        qa_jsonl_path=settings.qa_human_filtered_jsonl,
-        metadata_paths=(settings.video_metadata_human_json,),
-        max_samples=max_samples,
-        output_dir=str(base_out),
+    eligible_human = _eval_eligible_av_human(settings)
+    _print_task_distribution(
+        "[AV-Human] Loaded dataset (eval-eligible; MIS calibration rows excluded)",
+        eligible_human,
     )
+    samples_human = (
+        list(eligible_human)
+        if max_samples is None
+        else representative_even_sample(eligible_human, max_samples)
+    )
+    _print_task_distribution("[AV-Human] Selected subset (primary QA rows)", samples_human)
+    spare_by_task, spare_other = _partition_transcription_spares(eligible_human, samples_human)
+
     if no_prefetch_videos:
         print("[Prefetch] Skipped (--no-prefetch-videos).\n")
         vmap_h = {}
+        attach_human = samples_human
     else:
-        n_vids = len({s.video_id or s.sample_id for s in samples_human})
+        prefetch_pool = [*samples_human]
+        for dq in spare_by_task.values():
+            prefetch_pool.extend(dq)
+        prefetch_pool.extend(spare_other)
+        n_vids_primary = len({s.video_id or s.sample_id for s in samples_human})
+        n_vids_pf = len({s.video_id or s.sample_id for s in prefetch_pool})
         cap_note = f" (capped to {prefetch_videos} video_id(s))" if prefetch_videos is not None else ""
-        print(f"[Prefetch] AV-Human {n_vids} distinct video_id(s); one HF stream / one bar{cap_note}.\n")
+        print(
+            f"[Prefetch] AV-Human primary {n_vids_primary} distinct video_id(s) "
+            f"(+ transcription spares ⇒ {n_vids_pf} ids in prefetch bundle); "
+            f"one HF stream / one bar{cap_note}.\n"
+        )
         vmap_h, _ = prefetch_hf_avut_train_videos(
-            samples_human,
+            prefetch_pool,
             None,
             settings.hf_video_dataset_uri,
             max_videos=prefetch_videos,
             desc="Prefetch videos (HF)",
         )
-    attach_prefetched_videos(samples_human, vmap_h)
+        attach_human = prefetch_pool
+    attach_prefetched_videos(attach_human, vmap_h)
 
     m_human = _run_pass_inference(
         settings=settings,
@@ -550,6 +667,11 @@ def run_idea2_pipeline(
         metadata_paths=(settings.video_metadata_human_json,),
         out_dir=base_out,
         file_slug="av_human",
+        use_mis=use_mis,
+        transcription_spares=spare_by_task,
+        spare_fallback_other=spare_other,
+        human_video_map=vmap_h,
+        prefetch_videos=prefetch_videos,
     )
     return {"AV_Human": m_human}
 
@@ -565,6 +687,11 @@ def _run_pass_inference(
     out_dir: Path,
     file_slug: str,
     extra_metrics: dict | None = None,
+    use_mis: bool = False,
+    transcription_spares: dict[str, deque[MCQSample]] | None = None,
+    spare_fallback_other: deque[MCQSample] | None = None,
+    human_video_map: dict[str, object] | None = None,
+    prefetch_videos: int | None = None,
 ) -> dict:
     """Run Gemini pipeline over prepared samples (videos already attached)."""
     t0 = time.perf_counter()
@@ -581,14 +708,19 @@ def _run_pass_inference(
     _log(f"[{pass_label}] Model={settings.gemini_model}")
 
     client = GeminiClient(settings)
-    mis_budget = load_token_budget(settings.output_dir, fallback_per_modality=settings.max_output_tokens_describe)
-    per_mod_budget = PerModalityBudget(
-        text=mis_budget.text, audio=mis_budget.audio, visual=mis_budget.visual
-    )
-    _log(
-        f"[{pass_label}] Token budgets: text={per_mod_budget.text}, "
-        f"audio={per_mod_budget.audio}, visual={per_mod_budget.visual}"
-    )
+    per_mod_budget: PerModalityBudget | None = None
+    if use_mis:
+        mis_subdir = os.environ.get("MIS_SUBDIR", "mis")
+        mis_budget = load_token_budget(settings.output_dir, fallback_per_modality=settings.max_output_tokens_describe, mis_subdir=mis_subdir)
+        per_mod_budget = PerModalityBudget(
+            text=mis_budget.text, audio=mis_budget.audio, visual=mis_budget.visual
+        )
+        _log(
+            f"[{pass_label}] MIS token budgets: text={per_mod_budget.text}, "
+            f"audio={per_mod_budget.audio}, visual={per_mod_budget.visual}"
+        )
+    else:
+        _log(f"[{pass_label}] MIS disabled — raw transcript for text, uniform {settings.max_output_tokens_describe} for audio/visual")
     describer = ModalityDescriber(client, settings, per_modality_budget=per_mod_budget)
     reasoner = PragReasoner(client)
 
@@ -607,8 +739,18 @@ def _run_pass_inference(
     transcript_path = out_dir / "transcript.py"
     audio_cache_dir = out_dir / "audio_cache"
 
-    pbar = _gemini_sample_pbar(len(samples), desc=f"Gemini {pass_label}")
-    for sample in iter_samples(samples):
+    target_slots = len(samples)
+    spare_enabled = (
+        transcription_spares is not None
+        and spare_fallback_other is not None
+        and human_video_map is not None
+    )
+    sb_pool: dict[str, deque[MCQSample]] = (
+        transcription_spares if spare_enabled else {c: deque() for c in ORDERED_TASK_CODES}
+    )
+    so_pool: deque[MCQSample] = spare_fallback_other if spare_enabled else deque()
+
+    def eval_one(sample: MCQSample) -> str:
         client.set_run_context(
             pass_label=pass_label,
             sample_id=str(sample.sample_id),
@@ -622,7 +764,6 @@ def _run_pass_inference(
         text_desc = ""
         audio_desc = ""
         video_desc = ""
-        context_block = ""
         reasoning_cot = ""
         try:
             prepared = _prepare_modalities_for_sample(sample, client, audio_cache_dir, settings)
@@ -657,7 +798,10 @@ def _run_pass_inference(
 
             a_prompt = audio_perception_prompt(sample)
             v_prompt = video_perception_prompt(sample)
-            text_desc = describer.describe_text(sample) if used_text else "Text unavailable."
+            if used_text:
+                text_desc = describer.describe_text_summary(sample) if use_mis else describer.describe_text(sample)
+            else:
+                text_desc = "Text unavailable."
             audio_desc = (
                 describer.describe_audio(sample, a_prompt, text_desc)
                 if used_audio
@@ -669,7 +813,6 @@ def _run_pass_inference(
                 else "Video unavailable."
             )
 
-            # Decode stage removed: feed modality-specific descriptions directly to reasoner.
             context_block = (
                 f"[TEXT]\n{text_desc}\n\n"
                 f"[AUDIO]\n{audio_desc}\n\n"
@@ -693,9 +836,9 @@ def _run_pass_inference(
 
             preds.append(pred)
             correct.append(sample.answer)
-            task_code = sample.task_code or "UNKNOWN"
-            per_task_gold.setdefault(task_code, []).append(sample.answer)
-            per_task_pred.setdefault(task_code, []).append(pred)
+            tcode_key = sample.task_code or "UNKNOWN"
+            per_task_gold.setdefault(tcode_key, []).append(sample.answer)
+            per_task_pred.setdefault(tcode_key, []).append(pred)
             rows.append(
                 {
                     "pass": pass_label,
@@ -716,7 +859,9 @@ def _run_pass_inference(
                     "reasoning_cot": reasoning_cot,
                 }
             )
+            return "success"
         except TranscriptionFailure as exc:
+            print(f"  [WARN] Skipping sample_id={sample.sample_id}: {exc}")
             rows.append(
                 {
                     "pass": pass_label,
@@ -726,7 +871,7 @@ def _run_pass_inference(
                     "gold": sample.answer,
                     "pred": "",
                     "raw_pred": "",
-                    "status": "fatal_error",
+                    "status": "skipped_transcription",
                     "error": str(exc),
                     "used_text": used_text,
                     "used_audio": used_audio,
@@ -738,7 +883,7 @@ def _run_pass_inference(
                     "reasoning_cot": reasoning_cot,
                 }
             )
-            raise
+            return "trans_fail"
         except Exception as exc:
             rows.append(
                 {
@@ -761,10 +906,42 @@ def _run_pass_inference(
                     "reasoning_cot": reasoning_cot,
                 }
             )
-        finally:
+            return "error"
+
+    work: deque[MCQSample] = deque(iter_samples(samples))
+    slots_done = 0
+    pbar = _gemini_sample_pbar(target_slots, desc=f"Gemini {pass_label}")
+    while slots_done < target_slots:
+        if not work:
+            _log(
+                f"[{pass_label}] Work queue drained before completing {target_slots} slot(s): "
+                f"finished {slots_done}."
+            )
+            break
+        sample_cur = work.popleft()
+        outcome = eval_one(sample_cur)
+        if outcome == "success":
+            slots_done += 1
+            pbar.update(1)
+        elif outcome == "trans_fail" and spare_enabled and human_video_map is not None:
+            rep = _pop_transcription_spare(sample_cur.task_code, sb_pool, so_pool)
+            if rep is not None:
+                _ensure_human_video_attached(
+                    rep,
+                    client=client,
+                    settings=settings,
+                    human_video_map=human_video_map,
+                    prefetch_videos=prefetch_videos,
+                )
+                work.appendleft(rep)
+            else:
+                slots_done += 1
+                pbar.update(1)
+        else:
+            slots_done += 1
             pbar.update(1)
     pbar.close()
-    total = len(samples)
+    total = target_slots
     if total > 0:
         combo_summary = ", ".join(
             f"{k}={v}" for k, v in sorted(modality_combo_counts.items(), key=lambda kv: (-kv[1], kv[0]))

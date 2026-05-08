@@ -163,7 +163,7 @@ def compute_mis_scores(
 
 def mis_to_token_allocation(
     mis_scores: dict[str, float],
-    total_budget: int = 768,
+    total_budget: int,
 ) -> dict[str, int]:
     """Convert raw MIS scores to per-modality token allocations via softmax."""
     ordered = [mis_scores.get(m, 0.0) for m in MODALITIES]
@@ -188,6 +188,8 @@ def run_mis_evaluation(
     descriptions_by_sample: dict[str, dict[str, str]],
     settings: Settings,
     output_dir: Path,
+    *,
+    total_token_budget: int,
 ) -> dict[str, Any]:
     """Full MIS pipeline: ablate all subsets for all samples, compute scores, allocate tokens.
 
@@ -196,6 +198,7 @@ def run_mis_evaluation(
         descriptions_by_sample: {sample_id: {"text": ..., "audio": ..., "visual": ...}}
         settings: Project settings.
         output_dir: Where to write MIS artifacts.
+        total_token_budget: Sum of describe caps across text, audio, and visual (e.g. 3× Settings.max_output_tokens_describe).
 
     Returns:
         Dict with raw scores, weights, and token allocations.
@@ -242,7 +245,7 @@ def run_mis_evaluation(
 
     mis_scores = compute_mis_scores(results)
     weights = softmax([mis_scores[m] for m in MODALITIES])
-    token_alloc = mis_to_token_allocation(mis_scores, total_budget=768)
+    token_alloc = mis_to_token_allocation(mis_scores, total_token_budget)
 
     output = {
         "n_samples": len(samples),
@@ -251,7 +254,7 @@ def run_mis_evaluation(
         "mis_sample_ids": [str(s.sample_id) for s in samples],
         "raw_mis_scores": mis_scores,
         "softmax_weights": {MODALITIES[i]: weights[i] for i in range(len(MODALITIES))},
-        "token_allocation_budget": 768,
+        "token_allocation_budget": total_token_budget,
         "token_allocation": token_alloc,
         "per_subset_accuracy": {},
     }
