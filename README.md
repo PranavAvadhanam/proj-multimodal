@@ -1,11 +1,15 @@
 # AVUT Multimodal QA — PragCoT + Vanilla Baselines
 
-Gemini-based multimodal multiple-choice QA on the [AVUT benchmark](https://huggingface.co/datasets/tsinghua-ee/AVUTBenchmark). Made with Cursor and Claude Code.
+Modality-weighted/modality-separated prompting strategies to avoid modality bias (ex. bias towards using the text content of an input and ignoring its audio/visual content). Evaluation with Gemini-based multiple-choice video QA on the [AVUT benchmark](https://huggingface.co/datasets/tsinghua-ee/AVUTBenchmark). See Citations section. Made with Cursor and Claude Code.
 
 Two pipelines:
 
-- **Idea 2 (PragCoT)**: perception → modality descriptions → cross-modal reasoning → answer
+- **Idea 2 (Modality Separated PragCoT)**: perception → separated modality descriptions (ie. each description only based on one modality's content fed as input) → cross-modal reasoning → answer
 - **Vanilla**: single direct video+question → answer
+
+One key variation for each pipeline:
+
+- Modality Importance Scoring: Generate a relative weight of each modality's importance and use this to weight the contribution of each modality's description.
 
 Each pipeline has a **no-CoT** and a **CoT** variant (Gemini thinking tokens enabled/disabled).
 
@@ -221,5 +225,25 @@ All inference parameters live in `src/config.py` and are overridable via `.env`:
 | `MAX_AUDIO_DURATION_SECONDS`              | `60`       | Max audio length for STT                                 |
 | `HF_TOKEN`                                | —          | Hugging Face Hub token                                   |
 | `GOOGLE_CLOUD_PROJECT`                    | —          | GCP project for Speech-to-Text v2                        |
+
+Citations
+Bhosale, S., Chaudhuri, A., Williams, A.L.R., Tiwari, D., Dutta, A., Zhu, X., Bhattacharyya, P., Kanojia, D. (2023). Sarcasm in Sight and Sound: Benchmarking and Expansion to Improve Multimodal Sarcasm Detection. arXiv preprint arXiv:2310.01430.
+
+Castro, S., Hazarika, D., Pérez-Rosas, V., Zimmermann, R., Mihalcea, R., Poria, S. (2019). Towards Multimodal Sarcasm Detection (An _Obviously_ Perfect Paper). arXiv preprint arXiv:1906.01815.
+
+Chaubey, A., Pang, J., Siniukov, M., Soleymani, M. (2026). AVERE: Improving Audiovisual Emotion Reasoning with Preference Optimization. arXiv preprint arXiv:2602.07054.
+
+Chen, J., Guo, Z., Chun, J., Wang, P., Perrault, A., Elsner, M. (2025). Do Audio LLMs Really LISTEN, or Just Transcribe? Measuring Lexical vs. Acoustic Emotion Cues Reliance. arXiv preprint arXiv:2510.10444.
+
+Lanham, T., Chen, A., Radhakrishnan, A., Steiner, B., Denison, C.E., Hernandez, D., Li, D., Durmus, E., Hubinger, E., Kernion, J., Lukovsiut.e, K., Nguyen, K., Cheng, N., Joseph, N., Schiefer, N., Rausch, O., Larson, R., McCandlish, S., Kundu, S., Kadavath, S., Yang, S., Henighan, T., Maxwell, T.D., Telleen-Lawton, T., Hume, T., Hatfield-Dodds, Z., Kaplan, J., Brauner, J., Bowman, S., & Perez, E. (2023). Measuring Faithfulness in Chain-of-Thought Reasoning. ArXiv, abs/2307.13702.
+
+Li, Z., Chen, Y., Lai, H., Gao, X., Nayak, S., Coler, M. (2026). SarcasmMiner: A Dual-Track Post-Training Framework for Robust Audio-Visual Sarcasm Reasoning. arXiv preprint arXiv:2603.05275.
+
+Park, J., Jang, K.J., Alasaly, B., Mopidevi, S., Zolensky, A., Eaton, E., Lee, I., & Johnson, K. (2024). Assessing Modality Bias in Video Question Answering Benchmarks with Multimodal Large Language Models. ArXiv, abs/2408.12763.
+Saha, A., Suresh, V., Hospedales, T., Demberg, V. (2025). MUStReason: A Benchmark for Diagnosing Pragmatic Reasoning in Video-LMs for Multimodal Sarcasm Detection. arXiv preprint arXiv:2510.23727.
+
+Turpin, M., Michael, J., Perez, E., & Bowman, S. (2023). Language Models Don't Always Say What They Think: Unfaithful Explanations in Chain-of-Thought Prompting. ArXiv, abs/2305.04388.
+
+Wang, D., Liu, S., Zhang, T., Chen, Y., Li, J., Meng, H. (2026). EmotionThinker: Prosody-Aware Reinforcement Learning for Explainable Speech Emotion Reasoning. arXiv preprint arXiv:2601.15668.
 
 
